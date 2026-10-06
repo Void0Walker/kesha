@@ -1,8 +1,7 @@
 # kesha
 
 A Matrix bot that manages [Vikunja](https://vikunja.io) tasks through a language model on
-[OpenRouter](https://openrouter.ai). Named after Kesha, the talking parrot from *Возвращение блудного попугая*
-who's sure he knows everything.
+[OpenRouter](https://openrouter.ai).
 
 It is deliberately narrow: five strict tools, a hand-written tool loop, hard cost caps, and no personal data sent to
 the model provider. Deployment, secrets and the personal dictionary live in a separate private setup, not here.
