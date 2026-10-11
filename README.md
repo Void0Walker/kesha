@@ -15,8 +15,14 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
                                      └──real values──▶ Vikunja API
 ```
 
-- **One Matrix thread is one conversation.** A top-level message starts a thread, Kesha answers inside it.
-  Only users in `MATRIX_ALLOWED_USERS` are answered or can invite it, and only in encrypted rooms.
+- **A room is one conversation.** It starts over after `KESHA_CONVERSATION_IDLE_HOURS` of silence or on `!new`;
+  each restart has its own history and placeholder numbering, and the ended one is forgotten an hour later. Messages
+  of a room are handled one at a time in arrival order. A message written inside a thread is answered in that thread
+  but belongs to the room's conversation. Only users in `MATRIX_ALLOWED_USERS` are answered or can invite it, and
+  only in encrypted rooms.
+- **Replies are formatted:** simple Markdown from the model (bold, italic, lists, links, code) becomes Matrix HTML
+  after escaping everything, only http(s) links. `(#41)` links to the task when `VIKUNJA_PUBLIC_URL` is set. The cost
+  footer is small and grey.
 - **Tools:** `list_projects`, `list_tasks`, `get_task`, `create_task`, `update_task`. Arguments are validated
   with zod, invalid ones go back to the model as an error it can fix. There is no delete and no label tool.
 - **Writes are verified in code:** after every create or update the task is read back and compared.
@@ -26,8 +32,9 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
 - **Pseudonymization** at the OpenRouter boundary, both directions:
   - names, places, organisations from a YAML dictionary (with inflected forms), plus regexes for emails, phone
     numbers, IBANs, card numbers, IPs and URLs with tokens, become placeholders like `<PERSON_1>`;
-  - placeholders are numbered per thread and stored in SQLite, so the same person can't be linked across threads.
-    Mappings and history are deleted after 30 idle days;
+  - placeholders are numbered per conversation and stored in SQLite, so the same person can't be linked across
+    conversations. Mappings and history of an ended conversation are deleted an hour later, of any conversation after
+    30 idle days;
   - tool arguments are restored before Vikunja sees them, an invented placeholder is rejected;
   - OpenRouter's "Sensitive Info" guardrail redacts one way (`[PERSON_NAME]`, `[ADDRESS]`, ...), nothing can restore
     it. Tool arguments carrying those labels are refused, so they never land in Vikunja. If you use that guardrail, turn
@@ -41,10 +48,12 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
   "Rotate Kesha's Vikunja token" task in the inbox, due 3 days before expiry, and says so in Matrix.
   If Vikunja rejects the token later, Kesha stops using it and tells you.
 
-- **Research:** `!research <question>` starts a research thread. It uses `KESHA_RESEARCH_MODEL` with web search
-  (Exa through OpenRouter's `openrouter:web_search`, the engine that works with ZDR enforced) and the same task tools,
-  so findings can go straight into a task. Follow-ups in that thread stay in research mode. Searches are capped per
-  request, their sources are listed under the reply. Search queries come from the pseudonymized conversation, so
+- **Research:** `!research <question>` or `!r <question>` answers that one message with `KESHA_RESEARCH_MODEL` and
+  web search (Exa through OpenRouter's `openrouter:web_search`, the engine that works with ZDR enforced) and the same
+  task tools, so findings can go straight into a task. The answer joins the room's conversation; the next message goes
+  to the task model again unless it starts with `!r`, so the expensive model never stays on by accident. A notice
+  shows "Researching…" and is edited with the result. Searches are capped per request, their sources are listed under
+  the reply. Search queries come from the pseudonymized conversation, so
   placeholders never reach the search engine as real names. Exa has its own retention policy, ZDR doesn't cover it.
 - **Cost in every reply:** each answer ends with what the request cost, the number of web searches, and today's total
   against the daily cap, e.g. `— $0.0251 · 2 searches · today $0.1520 of $1.00`. OpenRouter's reported cost
@@ -69,8 +78,8 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
   results leave out default fields. History over 24k characters is cut to ~12k at once, so its start stays cacheable.
   Request bodies in the call log are blanked after 30 days, costs stay.
 
-Commands in a chat, answered without the model and free: `!help`, `!project [name|none]`, `!notify-here`,
-`!releases-here`, `!cost`. And `!research <question>`, which starts a research thread.
+Commands in a chat, answered without the model and free: `!help`, `!new`, `!project [name|none]`, `!notify-here`,
+`!releases-here`, `!cost`. And `!research <question>` / `!r <question>`, which use the research model.
 
 ## Configuration
 
@@ -85,6 +94,7 @@ Environment variables:
 | `VIKUNJA_TOKEN` | | API token: tasks read/create/update, projects read |
 | `VIKUNJA_TOKEN_EXPIRES` | | `YYYY-MM-DD`, drives the rotation reminder |
 | `VIKUNJA_INBOX_PROJECT_ID` | | default project for new tasks and the reminder |
+| `VIKUNJA_PUBLIC_URL` | | Vikunja as you open it, e.g. `https://tasks.example.org`, for task links in replies |
 | `OPENROUTER_API_KEY` | | |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | |
 | `OPENROUTER_ZDR` | `true` | only zero-data-retention endpoints |
@@ -106,6 +116,7 @@ Environment variables:
 | `KESHA_PII_FILE` | `/config/pii.yml` | the dictionary. Kesha refuses to start without it |
 | `KESHA_DATA_DIR` | `/data` | SQLite and Matrix stores |
 | `KESHA_TIMEZONE` | `Europe/Berlin` | for "tomorrow" and the daily cap |
+| `KESHA_CONVERSATION_IDLE_HOURS` | `3` | a room's conversation starts over after this much silence |
 
 Dictionary format:
 

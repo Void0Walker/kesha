@@ -7,14 +7,17 @@ import { loadConfig } from "./config.ts";
 import { checkTokenExpiry } from "./expiry.ts";
 import { OpenRouter } from "./llm.ts";
 import { Bot } from "./matrix.ts";
+import { activeConversations } from "./conversation.ts";
 import { announceRelease } from "./release.ts";
 import { Store } from "./store.ts";
 import { createTools } from "./tools.ts";
 import { Vikunja, VikunjaAuthError } from "./vikunja.ts";
 
 const IDLE_THREAD_MS = 30 * 86_400_000;
+// Ended conversations (after !new or a quiet period) are never read again: forget them, with their mappings, soon
+const ENDED_CONVERSATION_MS = 3_600_000;
 const CALL_BODIES_MS = 30 * 86_400_000;
-const HOUSEKEEPING_MS = 6 * 3_600_000;
+const HOUSEKEEPING_MS = 3_600_000;
 
 const config = loadConfig();
 const version = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
@@ -82,6 +85,8 @@ const bot = new Bot({
   listProjects: () => vikunja.listProjects(),
   version,
   changelog,
+  idleMs: config.KESHA_CONVERSATION_IDLE_HOURS * 3_600_000,
+  format: config.VIKUNJA_PUBLIC_URL ? { vikunjaUrl: config.VIKUNJA_PUBLIC_URL } : {},
 });
 await bot.start();
 try {
@@ -92,7 +97,8 @@ try {
 
 async function housekeeping() {
   const forgotten = store.forgetIdleThreads(IDLE_THREAD_MS);
-  if (forgotten) console.log(`pii: forgot ${forgotten} idle thread(s)`);
+  const ended = store.forgetEndedConversations(activeConversations(store), ENDED_CONVERSATION_MS);
+  if (forgotten + ended) console.log(`pii: forgot ${forgotten + ended} conversation(s)`);
   const blanked = store.pruneCallBodies(CALL_BODIES_MS);
   if (blanked) console.log(`calls: blanked ${blanked} request bodies older than 30 days`);
   try {

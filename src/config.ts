@@ -17,6 +17,8 @@ const Env = z.object({
   VIKUNJA_TOKEN_EXPIRES: z.iso.date(),
   // Where new tasks go by default, and where the rotation reminder is created
   VIKUNJA_INBOX_PROJECT_ID: z.coerce.number().int().positive(),
+  // Vikunja as the user opens it, for task links in replies. Unset: no links
+  VIKUNJA_PUBLIC_URL: z.url().optional(),
 
   OPENROUTER_API_KEY: z.string().min(1),
   OPENROUTER_BASE_URL: z.url().default("https://openrouter.ai/api/v1"),
@@ -51,6 +53,8 @@ const Env = z.object({
   KESHA_PII_FILE: z.string().default("/config/pii.yml"),
   KESHA_DATA_DIR: z.string().default("/data"),
   KESHA_TIMEZONE: z.string().default("Europe/Berlin"),
+  // A room's conversation starts over after this many hours of silence
+  KESHA_CONVERSATION_IDLE_HOURS: z.coerce.number().positive().default(3),
 });
 
 export type Config = z.infer<typeof Env>;

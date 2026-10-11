@@ -222,12 +222,13 @@ describe("research", () => {
     assert.equal(res.footer, undefined);
   });
 
-  it("forgets the mode of idle threads", async () => {
-    const { store, agent } = setup(new ScriptedModel([say("ok")]), {}, RESEARCH);
-    store.setThreadMode("old", "research");
-    await agent.turn("old", "!room", "hi", "research");
-    store.forgetIdleThreads(1000, NOW.getTime() + 2000);
-    assert.equal(store.threadMode("old"), undefined);
+  it("forgets ended conversations early and keeps the current ones", async () => {
+    const { store, agent } = setup(new ScriptedModel([say("ok"), say("ok")]));
+    await agent.turn("!room#1", "!room", "Jana");
+    await agent.turn("!room#2", "!room", "Jana");
+    assert.equal(store.forgetEndedConversations(new Set(["!room#2"]), 3_600_000, NOW.getTime() + 2 * 3_600_000), 1);
+    assert.equal(store.lookupPlaceholder("!room#1", "<PERSON_1>"), undefined);
+    assert.match(store.lookupPlaceholder("!room#2", "<PERSON_1>") ?? "", /Jana Nováková/);
   });
 });
 

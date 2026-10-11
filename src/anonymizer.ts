@@ -2,8 +2,8 @@ import { parse } from "yaml";
 import { z } from "zod";
 
 // Reversible pseudonymization at the OpenRouter boundary. Known entities come from the sops-encrypted dictionary,
-// structured PII (emails, phone numbers, ...) from regexes. Placeholders are numbered per Matrix thread, so the
-// same person is <PERSON_1> throughout one thread but can't be linked across threads.
+// structured PII (emails, phone numbers, ...) from regexes. Placeholders are numbered per conversation, so the
+// same person is <PERSON_1> throughout one conversation but can't be linked across conversations.
 
 export type Kind = "PERSON" | "PLACE" | "ORG" | "OTHER" | "EMAIL" | "PHONE" | "IBAN" | "CARD" | "IP" | "URL";
 

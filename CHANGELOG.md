@@ -2,6 +2,13 @@
 
 Kesha posts the section of a new version to the chat once it runs. Keep entries short and written for the user.
 
+## 0.7.0
+
+- Each room is now one ongoing conversation: just write, no need to reply inside threads. After 3 hours of silence I start fresh, or right away with `!new`.
+- `!r <question>` (or `!research`) answers that one message with web search; the next message is a normal one again. I post "Researching…" and update it when I'm done.
+- Replies are formatted: bold, lists and links, `(#41)` opens the task in Vikunja, and the cost line is small and grey.
+- The typing indicator stays on while I work on longer requests.
+
 ## 0.6.0
 
 - Cheaper replies: my instructions and tools are now cached between messages (about a tenth of the price from the second message on), and I no longer re-send old task lists with every message. A longer conversation used about 70% fewer tokens in tests.

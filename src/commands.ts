@@ -24,15 +24,19 @@ export function notifyRoom(store: Store, kind: NotifyKind): string | undefined {
   return store.getState(`notify-room:${kind}`) ?? store.getState("alert-room");
 }
 
-export const HELP = [
-  "Write to me in plain language about your tasks. Each top-level message starts a conversation, reply in its thread to continue it.",
-  "!research <question>: research thread with web search",
-  "!project <name>: new tasks in this room go to that project. !project shows it, !project none removes it",
-  "!notify-here: reminders and warnings go to this room",
-  "!releases-here: release notes go to this room",
-  "!cost: today's spend",
-  "!help: this list",
-].join("\n");
+export function help(idleHours: number): string {
+  return [
+    `Write to me in plain language about your tasks. Each room is one conversation; it starts fresh after ${idleHours} h of silence or with !new.`,
+    "",
+    "- `!r <question>` or `!research <question>`: answer this message with web search",
+    "- `!project <name>`: new tasks in this room go to that project. `!project` shows it, `!project none` removes it",
+    "- `!new`: start a fresh conversation in this room",
+    "- `!notify-here`: reminders and warnings go to this room",
+    "- `!releases-here`: release notes go to this room",
+    "- `!cost`: today's spend",
+    "- `!help`: this list",
+  ].join("\n");
+}
 
 export interface CommandDeps {
   store: Store;
@@ -41,9 +45,12 @@ export interface CommandDeps {
   dailyCap: number;
   version: string;
   changelog: string;
+  idleHours: number;
+  // Starts a new conversation in the room the command came from
+  newConversation(): void;
 }
 
-/** Returns the reply, or undefined when the message is not a command (or is !research, which goes to the agent). */
+/** Returns the reply, or undefined when the message is not a command (or is !research / !r, which go to the agent). */
 export async function runCommand(d: CommandDeps, room: string, body: string): Promise<string | undefined> {
   const m = /^!([a-z-]+)(?:\s+([\s\S]*))?$/i.exec(body);
   if (!m) return undefined;
@@ -51,9 +58,13 @@ export async function runCommand(d: CommandDeps, room: string, body: string): Pr
   const arg = (m[2] ?? "").trim();
   switch (name) {
     case "research":
+    case "r":
       return undefined;
     case "help":
-      return HELP;
+      return help(d.idleHours);
+    case "new":
+      d.newConversation();
+      return "New conversation: I've forgotten what we talked about in this room before.";
     case "cost":
       return `Spent today: $${d.spentToday().toFixed(4)} of $${d.dailyCap.toFixed(2)}`;
     case "notify-here":
@@ -66,7 +77,7 @@ export async function runCommand(d: CommandDeps, room: string, body: string): Pr
     case "project":
       return projectCommand(d, room, arg);
     default:
-      return `I don't know !${name}.\n\n${HELP}`;
+      return `I don't know !${name}.\n\n${help(d.idleHours)}`;
   }
 }
 

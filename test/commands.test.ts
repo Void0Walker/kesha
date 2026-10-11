@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { HELP, notifyRoom, roomProject, runCommand, type CommandDeps } from "../src/commands.ts";
+import { help, notifyRoom, roomProject, runCommand, type CommandDeps } from "../src/commands.ts";
 import { announceRelease } from "../src/release.ts";
 import { Store } from "../src/store.ts";
 import type { Project } from "../src/vikunja.ts";
@@ -11,11 +11,15 @@ const PROJECTS = [project(1, "Inbox"), project(2, "Home appliances"), project(3,
 function setup() {
   const store = new Store(":memory:", "Europe/Berlin");
   let projectCalls = 0;
+  let newConversations = 0;
   const deps: CommandDeps = {
-    store, spentToday: () => 0.1234, dailyCap: 1, version: "1.2.0", changelog: "## 1.2.0\n\n- Rooms.\n",
-    listProjects: async () => (projectCalls++, PROJECTS),
+    store, spentToday: () => 0.1234, dailyCap: 1, version: "1.2.0", changelog: "## 1.2.0\n\n- Rooms.\n", idleHours: 3,
+    listProjects: async () => (projectCalls++, PROJECTS), newConversation: () => void newConversations++,
   };
-  return { store, deps, run: (body: string, room = "!a") => runCommand(deps, room, body), projectCalls: () => projectCalls };
+  return {
+    store, deps, run: (body: string, room = "!a") => runCommand(deps, room, body),
+    projectCalls: () => projectCalls, newConversations: () => newConversations,
+  };
 }
 
 describe("commands", () => {
@@ -23,13 +27,21 @@ describe("commands", () => {
     const { run } = setup();
     assert.equal(await run("what is open?"), undefined);
     assert.equal(await run("!research best kettle"), undefined);
+    assert.equal(await run("!r best kettle"), undefined);
   });
 
   it("answers !help without Vikunja or the model, and unknown commands with the help", async () => {
     const { run, projectCalls } = setup();
-    assert.equal(await run("!help"), HELP);
+    assert.equal(await run("!help"), help(3));
+    assert.match(help(3), /fresh after 3 h of silence or with !new/);
     assert.match((await run("!frobnicate"))!, /I don't know !frobnicate/);
     assert.equal(projectCalls(), 0);
+  });
+
+  it("!new starts a new conversation", async () => {
+    const { run, newConversations } = setup();
+    assert.match((await run("!new"))!, /New conversation/);
+    assert.equal(newConversations(), 1);
   });
 
   it("shows today's spend", async () => {

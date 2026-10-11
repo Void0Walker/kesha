@@ -15,7 +15,7 @@ export interface Limits {
   reasoning?: ReasoningEffort;
 }
 
-// Model and per-request caps for !research threads, which may search the web
+// Model and per-request caps for !research messages, which may search the web
 export interface ResearchProfile {
   modelName: string;
   maxSteps: number;
@@ -103,9 +103,9 @@ export function systemPrompt(mode: Mode, project?: RoomProject): string {
       ? [
           "You can search the web. Use it for anything current or factual you aren't sure about, and prefer primary sources.",
           "Placeholders mean nothing outside this chat: never put them in search queries. If a question depends on who a placeholder is, search for the general topic.",
-          "Lead with the answer, then the key facts. Plain text, short lists are fine, no Markdown tables or headings. Sources are listed under your reply automatically, don't list URLs yourself.",
+          "Lead with the answer, then the key facts. Simple Markdown is fine (**bold**, lists); no tables or headings. Sources are listed under your reply automatically, don't list URLs yourself.",
         ]
-      : ["Keep replies short, plain text, no Markdown tables."]),
+      : ["Keep replies short. Simple Markdown is fine (**bold**, *italic*, lists, links); no tables or headings."]),
     ...(project
       ? [`This chat room belongs to the project "${project.title}" (id ${project.id}): new tasks go there unless the user names another project, and questions about tasks are about that project unless the user says otherwise.`]
       : []),

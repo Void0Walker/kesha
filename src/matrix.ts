@@ -2,6 +2,8 @@ import { join } from "node:path";
 import { MatrixClient, RustSdkCryptoStorageProvider, SimpleFsStorageProvider } from "matrix-bot-sdk";
 import type { Agent } from "./agent.ts";
 import { notifyRoom, roomProject, runCommand, type NotifyKind } from "./commands.ts";
+import { currentConversation } from "./conversation.ts";
+import { replyContent, type FormatOptions, type MatrixText } from "./format.ts";
 import type { Store } from "./store.ts";
 import { VikunjaAuthError, type Project } from "./vikunja.ts";
 
@@ -16,7 +18,7 @@ interface MessageEvent {
   content?: {
     msgtype?: string;
     body?: string;
-    "m.relates_to"?: { rel_type?: string; event_id?: string };
+    "m.relates_to"?: Relation;
   };
 }
 
@@ -30,15 +32,21 @@ export interface BotOptions {
   listProjects(): Promise<Project[]>;
   version: string;
   changelog: string;
+  // A room's conversation starts over after this much silence
+  idleMs: number;
+  format: FormatOptions;
 }
+
+type Relation = { rel_type?: string; event_id?: string };
 
 export class Bot {
   readonly client: MatrixClient;
   readonly #o: BotOptions;
-  // One turn at a time per thread, so a quick follow-up doesn't race the previous answer
+  // A room is one conversation: its messages are handled strictly in arrival order, one at a time
   readonly #queues = new Map<string, Promise<void>>();
   #vikunjaDown = false;
   #startedAt = 0;
+  #userId = "";
 
   constructor(o: BotOptions) {
     this.#o = o;
@@ -58,15 +66,14 @@ export class Bot {
       if (allowedUsers.includes(ev.sender)) await this.client.joinRoom(roomId);
       else await this.client.leaveRoom(roomId);
     });
-    this.client.on("room.message", (roomId: string, ev: MessageEvent) => {
-      this.#onMessage(roomId, ev).catch((e) => console.error("message handling failed:", e));
-    });
+    this.client.on("room.message", (roomId: string, ev: MessageEvent) => this.#enqueue(roomId, ev));
     this.client.on("room.failed_decryption", (roomId: string, _ev: unknown, e: Error) => {
       console.warn(`could not decrypt a message in ${roomId}: ${e.message}`);
     });
+    this.#userId = await this.client.getUserId();
     this.#startedAt = Date.now();
     await this.client.start();
-    console.log(`matrix: running as ${await this.client.getUserId()}`);
+    console.log(`matrix: running as ${this.#userId}`);
   }
 
   stop(): void {
@@ -81,7 +88,7 @@ export class Bot {
       console.warn(`no room to notify yet, message was: ${text}`);
       return false;
     }
-    await this.client.sendMessage(room, { msgtype: "m.notice", body: text });
+    await this.client.sendMessage(room, replyContent(text, this.#o.format, undefined, undefined, "m.notice"));
     return true;
   }
 
@@ -89,23 +96,35 @@ export class Bot {
     this.#vikunjaDown = down;
   }
 
-  async #onMessage(roomId: string, ev: MessageEvent): Promise<void> {
-    const { allowedUsers, agent, store } = this.#o;
+  // Synchronous on purpose: the message joins its room's queue before anything else can run
+  #enqueue(roomId: string, ev: MessageEvent): void {
     const body = ev.content?.body?.trim();
     const relation = ev.content?.["m.relates_to"];
     if (!body || ev.content?.msgtype !== "m.text") return;
-    if (ev.sender === (await this.client.getUserId()) || !allowedUsers.includes(ev.sender)) return;
+    if (ev.sender === this.#userId || !this.#o.allowedUsers.includes(ev.sender)) return;
     if (relation?.rel_type === "m.replace") return;
     if (ev.origin_server_ts < this.#startedAt - REPLAY_WINDOW_MS) return;
 
-    // Each Matrix thread is one conversation. A top-level message starts a new thread rooted at itself
-    const thread = relation?.rel_type === "m.thread" && relation.event_id ? relation.event_id : ev.event_id;
-    const reply = (text: string) =>
-      this.client.sendMessage(roomId, {
-        msgtype: "m.text",
-        body: text,
-        "m.relates_to": { rel_type: "m.thread", event_id: thread, is_falling_back: true, "m.in_reply_to": { event_id: ev.event_id } },
-      });
+    const run = (this.#queues.get(roomId) ?? Promise.resolve())
+      .then(() => this.#handle(roomId, ev, body, relation))
+      .catch((e) => console.error("message handling failed:", e));
+    this.#queues.set(roomId, run);
+    void run.then(() => {
+      if (this.#queues.get(roomId) === run) this.#queues.delete(roomId);
+    });
+  }
+
+  async #handle(roomId: string, ev: MessageEvent, body: string, relation: Relation | undefined): Promise<void> {
+    const { agent, store, format, idleMs } = this.#o;
+    // Written inside an old thread: answer there so the reply shows next to the question. It still belongs to the
+    // room's conversation
+    const thread = relation?.rel_type === "m.thread" && relation.event_id ? relation.event_id : undefined;
+    const relates = {
+      ...(thread ? { rel_type: "m.thread", event_id: thread, is_falling_back: true } : {}),
+      "m.in_reply_to": { event_id: ev.event_id },
+    };
+    const send = (content: MatrixText) => this.client.sendMessage(roomId, { ...content, "m.relates_to": relates });
+    const reply = (text: string) => send(replyContent(text, format));
 
     if (!(await this.client.crypto.isRoomEncrypted(roomId))) {
       await reply("I only work in encrypted rooms. Turn on encryption for this room or start an encrypted direct chat.");
@@ -115,8 +134,11 @@ export class Bot {
 
     try {
       const { listProjects, version, changelog } = this.#o;
-      const deps = { store, listProjects, spentToday: () => agent.spentToday(), dailyCap: agent.dailyCap, version, changelog };
-      const answer = await runCommand(deps, roomId, body);
+      const answer = await runCommand({
+        store, listProjects, version, changelog, idleHours: idleMs / 3_600_000,
+        spentToday: () => agent.spentToday(), dailyCap: agent.dailyCap,
+        newConversation: () => void currentConversation(store, roomId, ev.origin_server_ts, idleMs, true),
+      }, roomId, body);
       if (answer !== undefined) {
         await reply(answer);
         return;
@@ -127,11 +149,12 @@ export class Bot {
       await reply("That command failed, I couldn't reach Vikunja. Details are in my logs.");
       return;
     }
-    // !research <question> turns the thread into a research thread: the research model, with web search
-    const research = /^!research\b\s*([\s\S]*)$/i.exec(body);
+
+    // !research <question> or !r <question>: this one message goes to the research model, with web search
+    const research = /^!(?:research|r)\b\s*([\s\S]*)$/i.exec(body);
     const text = research ? research[1]!.trim() : body;
     if (research && !text) {
-      await reply("Usage: !research <question>. Follow-ups in the same thread stay in research mode.");
+      await reply("Usage: !research <question>, or !r <question>. Only that message uses research; start the next one with !r too if it needs the web.");
       return;
     }
     if (this.#vikunjaDown) {
@@ -139,25 +162,32 @@ export class Bot {
       return;
     }
 
-    if (research) store.setThreadMode(thread, "research");
-    const mode = store.threadMode(thread) === "research" ? "research" : "task";
+    const conversation = currentConversation(store, roomId, ev.origin_server_ts, idleMs);
+    // A typing notice lasts 30 s; long requests need it renewed
+    const typing = () => void this.client.setTyping(roomId, true, 30_000).catch(() => {});
+    typing();
+    const renew = setInterval(typing, 20_000);
+    const progress = research ? await send({ ...replyContent("Researching…", format, undefined, undefined, "m.notice") }).catch(() => undefined) : undefined;
+    let outcome = "Research failed.";
+    try {
+      const res = await agent.turn(conversation, roomId, text, research ? "research" : "task", roomProject(store, roomId));
+      if (res.tokenDead) this.#vikunjaDown = true;
+      await send(replyContent(res.reply, format, res.footer, res.alert));
+      outcome = `Research done: ${res.searches} ${res.searches === 1 ? "search" : "searches"}, $${res.cost.toFixed(4)}.`;
+    } catch (e) {
+      console.error("turn failed:", e);
+      await reply("Something went wrong on my side, nothing was changed after the error. Details are in my logs.");
+    } finally {
+      clearInterval(renew);
+      await this.client.setTyping(roomId, false).catch(() => {});
+      if (progress) await this.#edit(roomId, progress, outcome).catch(() => {});
+    }
+  }
 
-    const previous = this.#queues.get(thread) ?? Promise.resolve();
-    const run = previous.then(async () => {
-      await this.client.setTyping(roomId, true, 30_000).catch(() => {});
-      try {
-        const res = await agent.turn(thread, roomId, text, mode, roomProject(store, roomId));
-        if (res.tokenDead) this.#vikunjaDown = true;
-        await reply([res.reply, res.footer, res.alert && `⚠️ ${res.alert}`].filter(Boolean).join("\n\n"));
-      } catch (e) {
-        console.error("turn failed:", e);
-        await reply("Something went wrong on my side, nothing was changed after the error. Details are in my logs.");
-      } finally {
-        await this.client.setTyping(roomId, false).catch(() => {});
-      }
+  async #edit(roomId: string, eventId: string, text: string): Promise<void> {
+    const content = replyContent(text, this.#o.format, undefined, undefined, "m.notice");
+    await this.client.sendMessage(roomId, {
+      ...content, body: `* ${content.body}`, "m.new_content": content, "m.relates_to": { rel_type: "m.replace", event_id: eventId },
     });
-    this.#queues.set(thread, run);
-    await run;
-    if (this.#queues.get(thread) === run) this.#queues.delete(thread);
   }
 }

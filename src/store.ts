@@ -16,7 +16,8 @@ export interface CallLog {
   response: unknown;
 }
 
-/** SQLite on the data volume: cost log, per-thread history, mode and placeholder mapping, small key/value state. */
+/** SQLite on the data volume: cost log, per-conversation history and placeholder mapping, small key/value state.
+ * Columns named "thread" hold conversation keys: Matrix threads until 0.6, room conversations since 0.7. */
 export class Store {
   readonly db: DatabaseSync;
   readonly #timeZone: string;
@@ -38,7 +39,8 @@ export class Store {
         PRIMARY KEY (thread, placeholder));
       CREATE INDEX IF NOT EXISTS mappings_value ON mappings(thread, value);
       CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS thread_modes (thread TEXT PRIMARY KEY, mode TEXT NOT NULL);
+      -- Research threads until 0.6; research is per message since 0.7
+      DROP TABLE IF EXISTS thread_modes;
     `);
     // Added in 0.6.0. Nullable, so an older image can still insert rows after a rollback
     const columns = new Set((this.db.prepare("PRAGMA table_info(calls)").all() as { name: string }[]).map((c) => c.name));
@@ -97,16 +99,6 @@ export class Store {
       .run(thread, room, now, JSON.stringify(history));
   }
 
-  /** "research" for threads started with !research, undefined for ordinary task threads. */
-  threadMode(thread: string): string | undefined {
-    const row = this.db.prepare("SELECT mode FROM thread_modes WHERE thread = ?").get(thread) as { mode: string } | undefined;
-    return row?.mode;
-  }
-
-  setThreadMode(thread: string, mode: string): void {
-    this.db.prepare("INSERT INTO thread_modes (thread, mode) VALUES (?,?) ON CONFLICT(thread) DO UPDATE SET mode = excluded.mode").run(thread, mode);
-  }
-
   findPlaceholder(thread: string, value: string): string | undefined {
     const row = this.db.prepare("SELECT placeholder FROM mappings WHERE thread = ? AND value = ?").get(thread, value) as { placeholder: string } | undefined;
     return row?.placeholder;
@@ -128,14 +120,23 @@ export class Store {
 
   /** Mappings are PII themselves: drop them, with the history, once a thread has been idle long enough. */
   forgetIdleThreads(maxIdleMs: number, now = Date.now()): number {
-    const cutoff = now - maxIdleMs;
-    const idle = this.db.prepare("SELECT thread FROM threads WHERE last_active < ?").all(cutoff) as { thread: string }[];
-    for (const { thread } of idle) {
-      this.db.prepare("DELETE FROM mappings WHERE thread = ?").run(thread);
-      this.db.prepare("DELETE FROM threads WHERE thread = ?").run(thread);
-      this.db.prepare("DELETE FROM thread_modes WHERE thread = ?").run(thread);
-    }
+    const idle = this.db.prepare("SELECT thread FROM threads WHERE last_active < ?").all(now - maxIdleMs) as { thread: string }[];
+    for (const { thread } of idle) this.#forget(thread);
     return idle.length;
+  }
+
+  /** Conversations that are no longer the current one of their room are never read again: forget them soon instead
+   * of after the 30-day idle time. */
+  forgetEndedConversations(active: Set<string>, maxIdleMs: number, now = Date.now()): number {
+    const idle = this.db.prepare("SELECT thread FROM threads WHERE last_active < ?").all(now - maxIdleMs) as { thread: string }[];
+    const ended = idle.filter(({ thread }) => !active.has(thread));
+    for (const { thread } of ended) this.#forget(thread);
+    return ended.length;
+  }
+
+  #forget(thread: string): void {
+    this.db.prepare("DELETE FROM mappings WHERE thread = ?").run(thread);
+    this.db.prepare("DELETE FROM threads WHERE thread = ?").run(thread);
   }
 
   getState(key: string): string | undefined {
