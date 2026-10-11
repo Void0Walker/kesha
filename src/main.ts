@@ -18,6 +18,8 @@ const HOUSEKEEPING_MS = 6 * 3_600_000;
 const config = loadConfig();
 const version = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 console.log(`kesha ${version}`);
+// Release notes, posted to the chat when a new version starts and by !releases-here
+const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
 LogService.setLevel(LogLevel.WARN);
 mkdirSync(config.KESHA_DATA_DIR, { recursive: true });
 
@@ -71,11 +73,13 @@ const bot = new Bot({
   dataDir: config.KESHA_DATA_DIR,
   agent,
   store,
+  listProjects: () => vikunja.listProjects(),
+  version,
+  changelog,
 });
 await bot.start();
 try {
-  const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
-  if ((await announceRelease({ version, changelog, store, notify: (t) => bot.notify(t) })) === "announced") console.log(`announced ${version}`);
+  if ((await announceRelease({ version, changelog, store, notify: (t) => bot.notify(t, "releases") })) === "announced") console.log(`announced ${version}`);
 } catch (e) {
   console.error("release announcement failed:", e);
 }

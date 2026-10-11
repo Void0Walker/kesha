@@ -1,7 +1,9 @@
 import { join } from "node:path";
 import { MatrixClient, RustSdkCryptoStorageProvider, SimpleFsStorageProvider } from "matrix-bot-sdk";
 import type { Agent } from "./agent.ts";
+import { notifyRoom, roomProject, runCommand, type NotifyKind } from "./commands.ts";
 import type { Store } from "./store.ts";
+import { VikunjaAuthError, type Project } from "./vikunja.ts";
 
 // After a fresh start (empty sync store) the first sync replays recent room history. Anything older than this
 // before startup is not answered again; messages sent during a short restart still are
@@ -25,6 +27,9 @@ export interface BotOptions {
   dataDir: string;
   agent: Agent;
   store: Store;
+  listProjects(): Promise<Project[]>;
+  version: string;
+  changelog: string;
 }
 
 export class Bot {
@@ -68,10 +73,10 @@ export class Bot {
     this.client.stop();
   }
 
-  /** Message to the user outside a conversation (token expiry, Vikunja down, new version): goes to the room they
-   * last used. False when there is none yet. */
-  async notify(text: string): Promise<boolean> {
-    const room = this.#o.store.getState("alert-room");
+  /** Message to the user outside a conversation (token expiry, Vikunja down, new version): goes to the room set for
+   * that kind, else the room they last used. False when there is none yet. */
+  async notify(text: string, kind: NotifyKind = "alerts"): Promise<boolean> {
+    const room = notifyRoom(this.#o.store, kind);
     if (!room) {
       console.warn(`no room to notify yet, message was: ${text}`);
       return false;
@@ -108,8 +113,18 @@ export class Bot {
     }
     store.setState("alert-room", roomId);
 
-    if (body === "!cost") {
-      await reply(`Spent today: $${agent.spentToday().toFixed(4)} of $${agent.dailyCap.toFixed(2)}`);
+    try {
+      const { listProjects, version, changelog } = this.#o;
+      const deps = { store, listProjects, spentToday: () => agent.spentToday(), dailyCap: agent.dailyCap, version, changelog };
+      const answer = await runCommand(deps, roomId, body);
+      if (answer !== undefined) {
+        await reply(answer);
+        return;
+      }
+    } catch (e) {
+      if (e instanceof VikunjaAuthError) this.#vikunjaDown = true;
+      console.error("command failed:", e);
+      await reply("That command failed, I couldn't reach Vikunja. Details are in my logs.");
       return;
     }
     // !research <question> turns the thread into a research thread: the research model, with web search
@@ -131,7 +146,7 @@ export class Bot {
     const run = previous.then(async () => {
       await this.client.setTyping(roomId, true, 30_000).catch(() => {});
       try {
-        const res = await agent.turn(thread, roomId, text, mode);
+        const res = await agent.turn(thread, roomId, text, mode, roomProject(store, roomId));
         if (res.tokenDead) this.#vikunjaDown = true;
         await reply([res.reply, res.footer, res.alert && `⚠️ ${res.alert}`].filter(Boolean).join("\n\n"));
       } catch (e) {

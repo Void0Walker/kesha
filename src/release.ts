@@ -1,6 +1,6 @@
 import type { Store } from "./store.ts";
 
-const STATE_KEY = "announced-version";
+const ANNOUNCED = "announced-version";
 
 /** The changelog section of one version: the lines under "## <version>", up to the next "## ". */
 export function releaseNotes(changelog: string, version: string): string | undefined {
@@ -11,6 +11,16 @@ export function releaseNotes(changelog: string, version: string): string | undef
   return lines.slice(start + 1, end === -1 ? undefined : end).join("\n").trim() || undefined;
 }
 
+export function releaseText(version: string, changelog: string): string {
+  const notes = releaseNotes(changelog, version);
+  return notes ? `Kesha ${version} is running. What's new:\n${notes}` : `Kesha ${version} is running.`;
+}
+
+/** After this, the version isn't announced again on start. */
+export function markAnnounced(store: Store, version: string): void {
+  store.setState(ANNOUNCED, version);
+}
+
 export interface Announcement {
   version: string;
   changelog: string;
@@ -19,13 +29,10 @@ export interface Announcement {
   notify(text: string): Promise<boolean>;
 }
 
-/** Runs on start. Posts the release notes once per version, to the room the user last wrote in. */
+/** Runs on start. Posts the release notes once per version, to the release room or the room the user last wrote in. */
 export async function announceRelease(a: Announcement): Promise<"announced" | "already-announced" | "no-room"> {
-  if (a.store.getState(STATE_KEY) === a.version) return "already-announced";
-  const notes = releaseNotes(a.changelog, a.version);
-  if (!(await a.notify(notes ? `Kesha ${a.version} is running. What's new:\n${notes}` : `Kesha ${a.version} is running.`))) {
-    return "no-room";
-  }
-  a.store.setState(STATE_KEY, a.version);
+  if (a.store.getState(ANNOUNCED) === a.version) return "already-announced";
+  if (!(await a.notify(releaseText(a.version, a.changelog)))) return "no-room";
+  markAnnounced(a.store, a.version);
   return "announced";
 }

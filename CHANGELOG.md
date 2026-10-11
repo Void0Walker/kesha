@@ -2,6 +2,12 @@
 
 Kesha posts the section of a new version to the chat once it runs. Keep entries short and written for the user.
 
+## 0.4.0
+
+- Rooms with a topic: `!project <name>` in a room makes new tasks there go to that project, and questions there are about it. `!project` shows it, `!project none` removes it.
+- `!releases-here`: release notes go to this room. `!notify-here`: reminders and warnings go to this room. Both otherwise go to the room you last wrote in.
+- `!help` lists all commands. It costs nothing, the model isn't involved.
+
 ## 0.3.0
 
 - I announce each new version here, with what changed.

@@ -1,5 +1,6 @@
 import { Anonymizer, ProviderRedactionError, rejectProviderRedactions, UnknownPlaceholderError } from "./anonymizer.ts";
 import type { ChatModel, Message } from "./llm.ts";
+import type { RoomProject } from "./commands.ts";
 import type { Store } from "./store.ts";
 import { runTool, toolDefinitions, type Tool } from "./tools.ts";
 import { VikunjaAuthError } from "./vikunja.ts";
@@ -68,7 +69,8 @@ function sourceList(sources: Map<string, string | undefined>): string {
   return lines.length ? `\n\nSources:\n${lines.join("\n")}` : "";
 }
 
-function systemPrompt(now: Date, timeZone: string, mode: Mode): string {
+// project: the room's default project, its title already pseudonymized
+function systemPrompt(now: Date, timeZone: string, mode: Mode, project?: RoomProject): string {
   const local = now.toLocaleString("sv-SE", { timeZone, dateStyle: "short", timeStyle: "short" });
   return [
     "You are Kesha, a concise assistant that manages the user's tasks in Vikunja through the tools you have.",
@@ -77,7 +79,11 @@ function systemPrompt(now: Date, timeZone: string, mode: Mode): string {
     "Square-bracket labels like [PERSON_NAME] or [ADDRESS] are different: that text was removed before you saw it and is lost. Never write them into tasks; tell the user which part you couldn't see.",
     "Some tasks are private. You can't see or change them; if a tool says a task is private, tell the user to handle it in Vikunja themselves.",
     "Before changing or creating tasks, look up ids with the tools instead of guessing. After a change, confirm briefly what was done.",
+    ...(project
+      ? [`This chat room belongs to the project "${project.title}" (id ${project.id}): new tasks go there unless the user names another project, and questions about tasks are about that project unless the user says otherwise.`]
+      : []),
     "There is no delete tool. If the user wants a task deleted, mark it done or tell them to delete it in Vikunja.",
+    "Chat commands start with \"!\" and are handled without you. If the user asks what commands exist or how to set something up, tell them to send !help.",
     "Reply in the user's language.",
     ...(mode === "research"
       ? [
@@ -119,7 +125,7 @@ export class Agent {
     return this.#d.now?.() ?? new Date();
   }
 
-  async turn(thread: string, room: string, userText: string, mode: Mode = "task"): Promise<TurnResult> {
+  async turn(thread: string, room: string, userText: string, mode: Mode = "task", project?: RoomProject): Promise<TurnResult> {
     const { model, anonymizer, store, limits, tools, timeZone, research } = this.#d;
     if (mode === "research" && !research) {
       return { reply: "Research is not set up: KESHA_RESEARCH_MODEL is empty.", cost: 0, searches: 0 };
@@ -137,6 +143,7 @@ export class Agent {
     // Record the thread before anything is pseudonymized, so the idle cleanup also finds its mappings
     store.saveHistory(thread, room, history);
     history.push({ role: "user", content: anonymizer.anonymize(thread, userText).text });
+    const promptProject = project && { id: project.id, title: anonymizer.anonymize(thread, project.title).text };
 
     let cost = 0;
     let searches = 0;
@@ -155,7 +162,7 @@ export class Agent {
         break;
       }
 
-      const messages: Message[] = [{ role: "system", content: systemPrompt(this.#now(), timeZone, mode) }, ...history];
+      const messages: Message[] = [{ role: "system", content: systemPrompt(this.#now(), timeZone, mode, promptProject) }, ...history];
       const searchesLeft = run.maxSearches - searches;
       const res = await model.complete({
         model: run.modelName, messages, tools: this.#toolDefs, maxTokens: run.maxTokens,
@@ -182,6 +189,10 @@ export class Agent {
         try {
           const args = anonymizer.deanonymizeValueStrict(thread, JSON.parse(call.function.arguments || "{}"));
           rejectProviderRedactions(args);
+          // In a room with a default project, new tasks go there unless the model named one
+          if (project && call.function.name === "create_task" && args && typeof args === "object" && !("project_id" in args)) {
+            (args as Record<string, unknown>).project_id = project.id;
+          }
           result = (await runTool(tools, call.function.name, args)).result;
         } catch (e) {
           if (e instanceof VikunjaAuthError) {

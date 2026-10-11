@@ -229,6 +229,23 @@ describe("research", () => {
   });
 });
 
+describe("room project", () => {
+  it("puts new tasks into the room's project unless the model names one, and pseudonymizes its title", async () => {
+    const model = new ScriptedModel([
+      (req) => {
+        assert.match(String(req.messages[0]!.content), /belongs to the project "<PERSON_1>'s room" \(id 2\)/);
+        return toolCall("create_task", { title: "Descale kettle" });
+      },
+      toolCall("create_task", { title: "Pay rent", project_id: 1 }, "call_2"),
+      say("Done."),
+    ]);
+    const { v, agent } = setup(model);
+    await agent.turn("t", "!room", "add two tasks", "task", { id: 2, title: "Jana's room" });
+    assert.deepEqual(v.writes.map((w) => (w.body as { projectId: number }).projectId), [2, 1]);
+    assert.doesNotMatch(model.sent(), /Jana/);
+  });
+});
+
 describe("cost footer", () => {
   it("shows the request cost and today's total on task replies", async () => {
     const model = new ScriptedModel([toolCall("list_projects", {}), say("Two projects.")], 0.004);

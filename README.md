@@ -53,7 +53,14 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
 - **Release notes:** when a new version starts, Kesha posts its section of `CHANGELOG.md` to the room you last wrote
   in, once per version.
 
-Commands in a chat: `!research <question>`, `!cost` shows today's spend.
+- **Rooms:** Kesha works in every encrypted room it's invited to. `!project <name>` gives a room a default project:
+  new tasks there go to it (enforced in code when the model names no project), and the model treats questions there
+  as being about it. The title reaches the model pseudonymized.
+- **Notifications:** reminders and warnings go to the room set with `!notify-here`, release notes to the one set with
+  `!releases-here`, otherwise to the room the user last wrote in.
+
+Commands in a chat, answered without the model and free: `!help`, `!project [name|none]`, `!notify-here`,
+`!releases-here`, `!cost`. And `!research <question>`, which starts a research thread.
 
 ## Configuration
 

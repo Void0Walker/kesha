@@ -110,6 +110,10 @@ export class Store {
     return row?.value;
   }
 
+  deleteState(key: string): void {
+    this.db.prepare("DELETE FROM state WHERE key = ?").run(key);
+  }
+
   setState(key: string, value: string): void {
     this.db.prepare("INSERT INTO state (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
   }
