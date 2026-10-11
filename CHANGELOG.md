@@ -2,6 +2,11 @@
 
 Kesha posts the section of a new version to the chat once it runs. Keep entries short and written for the user.
 
+## 0.5.0
+
+- Say "note that decision" (or similar) and I record it as a finished task in the room's project: "Decision: …", with what was decided, why, what was ruled out, and the date. A summary, never the conversation itself.
+- I only create or change tasks when you ask. Talking about something doesn't add a task.
+
 ## 0.4.0
 
 - Rooms with a topic: `!project <name>` in a room makes new tasks there go to that project, and questions there are about it. `!project` shows it, `!project none` removes it.

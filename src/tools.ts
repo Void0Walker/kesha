@@ -162,11 +162,14 @@ export function createTools(vikunja: VikunjaApi, inboxProjectId: number, variant
           project_id: z.number().int().positive().optional(),
           due_date: DueDate.optional(),
           priority: Priority.optional(),
+          done: z.boolean().optional().describe("create it already done, e.g. a recorded decision"),
         })
         .strict(),
       async run(a) {
         const fields = toChanges(a) as TaskChanges & { title: string };
         const created = await vikunja.createTask(a.project_id ?? inboxProjectId, fields);
+        // In case Vikunja ignores done on create
+        if (fields.done && !created.done) await vikunja.updateTask(created.id, { done: true });
         return summarize(await verify(created.id, fields), true);
       },
     }),

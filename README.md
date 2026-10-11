@@ -56,6 +56,9 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
 - **Rooms:** Kesha works in every encrypted room it's invited to. `!project <name>` gives a room a default project:
   new tasks there go to it (enforced in code when the model names no project), and the model treats questions there
   as being about it. The title reaches the model pseudonymized.
+- **Decisions:** only on request ("note that decision"), Kesha creates a task already marked done, titled
+  "Decision: …", with a summary (what, why, what was ruled out, date) in the room's project. Conversations themselves
+  never go to Vikunja; they stay pseudonymized in Kesha's SQLite and are deleted after 30 idle days.
 - **Notifications:** reminders and warnings go to the room set with `!notify-here`, release notes to the one set with
   `!releases-here`, otherwise to the room the user last wrote in.
 
