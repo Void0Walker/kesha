@@ -29,6 +29,10 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
   - placeholders are numbered per thread and stored in SQLite, so the same person can't be linked across threads.
     Mappings and history are deleted after 30 idle days;
   - tool arguments are restored before Vikunja sees them, an invented placeholder is rejected;
+  - OpenRouter's "Sensitive Info" guardrail redacts one way (`[PERSON_NAME]`, `[ADDRESS]`, ...), nothing can restore
+    it. Tool arguments carrying those labels are refused, so they never land in Vikunja. If you use that guardrail, turn
+    off its Person name and Address detection: the dictionary handles names reversibly, and the NLP detection also
+    hits words that aren't names;
   - everything that was sent is logged (pseudonymized) in SQLite for reviewing leaks.
 - **Cost control:** OpenRouter's reported cost per call is logged. Per request: step limit, `max_tokens`, cost limit,
   and a warning above the alert threshold. Per day: no model calls once the cap is reached. Requests only go to

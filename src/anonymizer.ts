@@ -70,6 +70,26 @@ const PATTERNS: Pattern[] = [
 ];
 // One regex per kind, so placeholders are numbered in the order things appear in the text
 
+// Labels OpenRouter's "Sensitive Info" guardrail puts in place of what it redacts. One-way: nothing can restore them
+const PROVIDER_REDACTION = /\[(?:EMAIL|PHONE|SSN|CREDIT_CARD|IP_ADDRESS|PERSON_NAME|ADDRESS|REDACTED|SECRET:[\w.-]+)\]/g;
+
+export class ProviderRedactionError extends Error {
+  constructor(labels: string[]) {
+    super(`${labels.join(", ")} was removed by the provider before you saw it and can't be recovered. Don't write it into tasks or search for it: leave that text out or unchanged, and tell the user what you couldn't see.`);
+    this.name = "ProviderRedactionError";
+  }
+}
+
+/** Throws when tool arguments carry the provider's redaction labels, so they never end up in Vikunja. */
+export function rejectProviderRedactions(value: unknown): void {
+  const labels = new Set<string>();
+  mapStrings(value, (s) => {
+    for (const m of s.matchAll(PROVIDER_REDACTION)) labels.add(m[0]);
+    return s;
+  });
+  if (labels.size) throw new ProviderRedactionError([...labels]);
+}
+
 export class UnknownPlaceholderError extends Error {
   constructor(placeholders: string[]) {
     super(`unknown placeholder(s) ${placeholders.join(", ")}: only use placeholders that appeared in this conversation`);

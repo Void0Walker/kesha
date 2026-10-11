@@ -1,4 +1,4 @@
-import { Anonymizer, UnknownPlaceholderError } from "./anonymizer.ts";
+import { Anonymizer, ProviderRedactionError, rejectProviderRedactions, UnknownPlaceholderError } from "./anonymizer.ts";
 import type { ChatModel, Message } from "./llm.ts";
 import type { Store } from "./store.ts";
 import { runTool, toolDefinitions, type Tool } from "./tools.ts";
@@ -74,6 +74,7 @@ function systemPrompt(now: Date, timeZone: string, mode: Mode): string {
     "You are Kesha, a concise assistant that manages the user's tasks in Vikunja through the tools you have.",
     `Now: ${local} (${timeZone}). Resolve relative dates ("tomorrow", "Friday") against this, and give due dates with the UTC offset of ${timeZone}.`,
     "Names, places, emails and similar details are replaced by placeholders like <PERSON_1> or <EMAIL_2>. Treat each placeholder as the real value: use it as-is in tool arguments and replies, never invent new ones, never ask what it stands for.",
+    "Square-bracket labels like [PERSON_NAME] or [ADDRESS] are different: that text was removed before you saw it and is lost. Never write them into tasks; tell the user which part you couldn't see.",
     "Some tasks are private. You can't see or change them; if a tool says a task is private, tell the user to handle it in Vikunja themselves.",
     "Before changing or creating tasks, look up ids with the tools instead of guessing. After a change, confirm briefly what was done.",
     "There is no delete tool. If the user wants a task deleted, mark it done or tell them to delete it in Vikunja.",
@@ -180,13 +181,14 @@ export class Agent {
         let result: unknown;
         try {
           const args = anonymizer.deanonymizeValueStrict(thread, JSON.parse(call.function.arguments || "{}"));
+          rejectProviderRedactions(args);
           result = (await runTool(tools, call.function.name, args)).result;
         } catch (e) {
           if (e instanceof VikunjaAuthError) {
             return finish("Vikunja rejected my token: it expired or was revoked. Rotate it (README, \"Rotating the Kesha Vikunja token\"). Nothing was changed.", { tokenDead: true });
           }
           if (e instanceof SyntaxError) result = { error: "arguments are not valid JSON" };
-          else if (e instanceof UnknownPlaceholderError) result = { error: e.message };
+          else if (e instanceof UnknownPlaceholderError || e instanceof ProviderRedactionError) result = { error: e.message };
           else throw e;
         }
         history.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(anonymizer.anonymizeValue(thread, result)) });

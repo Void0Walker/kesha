@@ -101,6 +101,32 @@ describe("agent", () => {
     assert.equal(v.writes.length, 0);
   });
 
+  it("refuses to write the provider's redaction labels into Vikunja", async () => {
+    const model = new ScriptedModel([
+      toolCall("create_task", { title: "Call [PERSON_NAME] at [PHONE]" }),
+      (req) => {
+        assert.match(String(req.messages.at(-1)!.content), /\[PERSON_NAME\], \[PHONE\] was removed by the provider/);
+        return toolCall("update_task", { id: 1, description: "Notes: [SECRET:github-token]" });
+      },
+      (req) => {
+        assert.match(String(req.messages.at(-1)!.content), /\[SECRET:github-token\] was removed/);
+        return say("I couldn't see the name, please tell me who to call.");
+      },
+    ]);
+    const { v, agent } = setup(model);
+    v.add({ title: "Existing" });
+    const res = await agent.turn("t", "!room", "add a task");
+    assert.equal(v.writes.length, 0);
+    assert.match(res.reply, /couldn't see the name/);
+  });
+
+  it("still writes square brackets that aren't redaction labels", async () => {
+    const model = new ScriptedModel([toolCall("create_task", { title: "[WIP] Fix bike" }), say("Added.")]);
+    const { v, agent } = setup(model);
+    await agent.turn("t", "!room", "add [WIP] Fix bike");
+    assert.equal(v.writes.length, 1);
+  });
+
   it("keeps the conversation per thread, pseudonymized", async () => {
     const model = new ScriptedModel([say("Noted."), say("You asked about <PERSON_1>.")]);
     const { store, agent } = setup(model);
