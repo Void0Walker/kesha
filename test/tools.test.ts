@@ -80,7 +80,7 @@ describe("tools", () => {
     const t = v.add({ title: "x", due_date: "2026-10-10T16:00:00Z" });
     const r = await runTool(tools, "update_task", { id: t.id, due_date: null });
     assert.ok(r.ok);
-    assert.equal((r.result as any).due_date, null);
+    assert.equal((r.result as any).due_date, undefined);
   });
 
   it("reports a write that Vikunja didn't store", async () => {
@@ -110,5 +110,23 @@ describe("tools", () => {
     const text = "Line one\nline two\n\nNew <para> & more";
     assert.equal(htmlToText(textToHtml(text)), text);
     assert.equal(htmlToText("<ul><li>a</li><li>b</li></ul>"), "- a\n- b");
+  });
+});
+
+describe("token-lean tool output", () => {
+  it("sends schemas without the $schema URL and safe-integer bounds", () => {
+    const defs = JSON.stringify(toolDefinitions(createTools(new FakeVikunja(), 1, (t) => [t])));
+    assert.doesNotMatch(defs, /\$schema|9007199254740991/);
+    assert.match(defs, /"additionalProperties":false/);
+  });
+
+  it("leaves default fields out of task summaries", async () => {
+    const v = new FakeVikunja();
+    v.add({ title: "Plain" });
+    v.add({ title: "Busy", priority: 3, due_date: "2026-10-10T16:00:00Z" });
+    const r = await runTool(createTools(v, 1, (t) => [t]), "list_tasks", {});
+    const tasks = (r.result as { tasks: unknown[] }).tasks;
+    assert.deepEqual(tasks[0], { id: 1, title: "Plain", project_id: 1 });
+    assert.deepEqual(tasks[1], { id: 2, title: "Busy", due_date: "2026-10-10T16:00:00Z", priority: 3, project_id: 1 });
   });
 });

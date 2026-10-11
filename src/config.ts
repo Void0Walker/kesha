@@ -23,6 +23,10 @@ const Env = z.object({
   // Only route to providers that don't store or train on prompts. Narrows the model choice
   OPENROUTER_ZDR: z.stringbool().default(true),
   KESHA_MODEL: z.string().min(1),
+  // Unset: the model's default. off asks it not to think (on Anthropic models effort turns thinking on)
+  KESHA_REASONING_EFFORT: z.enum(["off", "low", "medium", "high"]).optional(),
+  // full: cache system prompt and conversation (Anthropic models), system: only the system prompt, off
+  KESHA_PROMPT_CACHE: z.enum(["full", "system", "off"]).default("full"),
 
   KESHA_MAX_STEPS: z.coerce.number().int().positive().default(8),
   KESHA_MAX_TOKENS: z.coerce.number().int().positive().default(1500),
@@ -40,6 +44,7 @@ const Env = z.object({
   KESHA_RESEARCH_MAX_COST_PER_REQUEST: money(0.25),
   // Web searches per research request, over all its model calls
   KESHA_RESEARCH_MAX_SEARCHES: z.coerce.number().int().positive().default(6),
+  KESHA_RESEARCH_REASONING_EFFORT: z.enum(["off", "low", "medium", "high"]).default("medium"),
   // Exa through OpenRouter, per search. Added to the cost when OpenRouter's reported cost leaves it out
   KESHA_SEARCH_COST: money(0.007),
 

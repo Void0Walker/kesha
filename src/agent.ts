@@ -1,5 +1,5 @@
 import { Anonymizer, ProviderRedactionError, rejectProviderRedactions, UnknownPlaceholderError } from "./anonymizer.ts";
-import type { ChatModel, Message } from "./llm.ts";
+import type { ChatModel, Message, ReasoningEffort } from "./llm.ts";
 import type { RoomProject } from "./commands.ts";
 import type { Store } from "./store.ts";
 import { runTool, toolDefinitions, type Tool } from "./tools.ts";
@@ -11,6 +11,8 @@ export interface Limits {
   maxCostPerRequest: number;
   alertCost: number;
   dailyCap: number;
+  // Unset: the task model's default
+  reasoning?: ReasoningEffort;
 }
 
 // Model and per-request caps for !research threads, which may search the web
@@ -21,6 +23,7 @@ export interface ResearchProfile {
   maxCostPerRequest: number;
   // Web searches per request, over all its model calls
   maxSearches: number;
+  reasoning?: ReasoningEffort;
 }
 
 export type Mode = "task" | "research";
@@ -50,8 +53,10 @@ export interface TurnResult {
   tokenDead?: boolean;
 }
 
-// Older messages are dropped from the thread history beyond this, cut at a user message
-const MAX_HISTORY = 40;
+// History over this size (JSON chars) is cut to HISTORY_TRIM_TO at a user message. The gap keeps the start of the
+// history, and so the cached prompt prefix, unchanged for many turns instead of shifting every turn
+const HISTORY_MAX_CHARS = 24_000;
+const HISTORY_TRIM_TO = 12_000;
 // Sources listed under a research reply
 const MAX_SOURCES = 8;
 
@@ -69,21 +74,28 @@ function sourceList(sources: Map<string, string | undefined>): string {
   return lines.length ? `\n\nSources:\n${lines.join("\n")}` : "";
 }
 
-// project: the room's default project, its title already pseudonymized
-function systemPrompt(now: Date, timeZone: string, mode: Mode, project?: RoomProject): string {
+/** Local send time with weekday and UTC offset, e.g. "Sat 2026-10-11 14:22 +02:00". */
+export function sentAt(now: Date, timeZone: string): string {
+  const day = now.toLocaleDateString("en-US", { timeZone, weekday: "short" });
   const local = now.toLocaleString("sv-SE", { timeZone, dateStyle: "short", timeStyle: "short" });
+  const offset = now.toLocaleString("en-US", { timeZone, timeZoneName: "longOffset" }).split("GMT")[1] || "+00:00";
+  return `${day} ${local} ${offset}`;
+}
+
+// The prompt is the same for every call of a conversation, so providers can cache it: nothing time-dependent here,
+// the send time is on each user message. Varying parts last. project: the room's default project, title pseudonymized
+export function systemPrompt(mode: Mode, project?: RoomProject): string {
   return [
     "You are Kesha, a concise assistant that manages the user's tasks in Vikunja through the tools you have.",
-    `Now: ${local} (${timeZone}). Resolve relative dates ("tomorrow", "Friday") against this, and give due dates with the UTC offset of ${timeZone}.`,
+    "Each user message starts with its local send time in brackets, like [Sat 2026-10-11 14:22 +02:00]. Resolve relative dates (\"tomorrow\", \"Friday\") against it, give due dates with that UTC offset, and don't repeat the bracket in replies.",
     "Names, places, emails and similar details are replaced by placeholders like <PERSON_1> or <EMAIL_2>. Treat each placeholder as the real value: use it as-is in tool arguments and replies, never invent new ones, never ask what it stands for.",
     "Square-bracket labels like [PERSON_NAME] or [ADDRESS] are different: that text was removed before you saw it and is lost. Never write them into tasks; tell the user which part you couldn't see.",
     "Some tasks are private. You can't see or change them; if a tool says a task is private, tell the user to handle it in Vikunja themselves.",
     "Only create or change tasks when the user asks you to. Talking about something is not a request to add a task.",
     "Before changing or creating tasks, look up ids with the tools instead of guessing. After a change, confirm briefly what was done.",
+    "When you mention a task, add its id like (#41), so later messages can refer to it. Earlier tool results are not kept between messages.",
+    "Task fields missing from tool results have their defaults: not done, priority 0, no due date, no labels.",
     "When the user asks you to note or record a decision, create one open task (not done): title \"Decision: \" and the decision in a few words; description with what was decided, the main reasons, the options ruled out, and today's date. Summarize, never copy the conversation into it. Only create a task as done when the user says it is already done.",
-    ...(project
-      ? [`This chat room belongs to the project "${project.title}" (id ${project.id}): new tasks go there unless the user names another project, and questions about tasks are about that project unless the user says otherwise.`]
-      : []),
     "There is no delete tool. If the user wants a task deleted, mark it done or tell them to delete it in Vikunja.",
     "Chat commands start with \"!\" and are handled without you. If the user asks what commands exist or how to set something up, tell them to send !help.",
     "Reply in the user's language.",
@@ -94,16 +106,37 @@ function systemPrompt(now: Date, timeZone: string, mode: Mode, project?: RoomPro
           "Lead with the answer, then the key facts. Plain text, short lists are fine, no Markdown tables or headings. Sources are listed under your reply automatically, don't list URLs yourself.",
         ]
       : ["Keep replies short, plain text, no Markdown tables."]),
+    ...(project
+      ? [`This chat room belongs to the project "${project.title}" (id ${project.id}): new tasks go there unless the user names another project, and questions about tasks are about that project unless the user says otherwise.`]
+      : []),
   ].join("\n");
 }
 
-/** Keep the tail of the history, starting at a user message so tool calls and their results stay together. */
-function trimHistory(history: Message[]): Message[] {
-  if (history.length <= MAX_HISTORY) return history;
-  const tail = history.slice(-MAX_HISTORY);
-  const start = tail.findIndex((m) => m.role === "user");
-  return start === -1 ? [] : tail.slice(start);
+/** At the end of a turn keep what was said: user messages and final replies. Tool calls, their results and reasoning
+ * are dropped, they would be re-sent with every later call. Idempotent, also cleans histories from older versions. */
+export function compactHistory(history: Message[]): Message[] {
+  return history.flatMap((m): Message[] => {
+    if (m.role === "tool" || (m.role === "assistant" && m.tool_calls?.length)) return [];
+    if (m.role === "assistant" && "reasoning_details" in m) {
+      const { reasoning_details: _, ...rest } = m as typeof m & { reasoning_details: unknown };
+      return [rest];
+    }
+    return [m];
+  });
 }
+
+/** Over HISTORY_MAX_CHARS, keep the newest ~HISTORY_TRIM_TO chars, starting at a user message. */
+export function trimHistory(history: Message[]): Message[] {
+  const size = (h: Message[]) => JSON.stringify(h).length;
+  if (size(history) <= HISTORY_MAX_CHARS) return history;
+  let start = 0;
+  while (start < history.length - 1 && size(history.slice(start)) > HISTORY_TRIM_TO) start++;
+  let first = history.findIndex((m, i) => i >= start && m.role === "user");
+  if (first === -1) first = history.findLastIndex((m) => m.role === "user");
+  return first === -1 ? [] : history.slice(first);
+}
+
+const NO_ANSWER = "I got no answer from the model. Please try again.";
 
 export class Agent {
   readonly #d: AgentDeps;
@@ -134,18 +167,26 @@ export class Agent {
     }
     const run = mode === "research" && research
       ? research
-      : { modelName: this.#d.modelName, maxSteps: limits.maxSteps, maxTokens: limits.maxTokens, maxCostPerRequest: limits.maxCostPerRequest, maxSearches: 0 };
+      : {
+          modelName: this.#d.modelName, maxSteps: limits.maxSteps, maxTokens: limits.maxTokens, maxCostPerRequest: limits.maxCostPerRequest,
+          maxSearches: 0, ...(limits.reasoning ? { reasoning: limits.reasoning } : {}),
+        };
 
     const spent = this.spentToday();
     if (spent >= limits.dailyCap) {
       return { reply: `Today's budget is used up (${credits(spent)} of ${credits(limits.dailyCap)}). I'm back tomorrow.`, cost: 0, searches: 0 };
     }
 
+    const now = this.#now();
     const history = store.getHistory(thread) as Message[];
     // Record the thread before anything is pseudonymized, so the idle cleanup also finds its mappings
-    store.saveHistory(thread, room, history);
-    history.push({ role: "user", content: anonymizer.anonymize(thread, userText).text });
+    store.saveHistory(thread, room, history, now.getTime());
+    // The time goes on after pseudonymizing: it holds no PII, and the phone/card patterns must not see it
+    history.push({ role: "user", content: `[${sentAt(now, timeZone)}] ${anonymizer.anonymize(thread, userText).text}` });
     const promptProject = project && { id: project.id, title: anonymizer.anonymize(thread, project.title).text };
+    // Built once per turn: identical bytes in every call keep the prompt cache warm
+    const system: Message = { role: "system", content: systemPrompt(mode, promptProject) };
+    const sessionId = store.sessionId(thread);
 
     let cost = 0;
     let searches = 0;
@@ -164,24 +205,29 @@ export class Agent {
         break;
       }
 
-      const messages: Message[] = [{ role: "system", content: systemPrompt(this.#now(), timeZone, mode, promptProject) }, ...history];
+      const messages: Message[] = [system, ...history];
       const searchesLeft = run.maxSearches - searches;
       const res = await model.complete({
-        model: run.modelName, messages, tools: this.#toolDefs, maxTokens: run.maxTokens,
+        model: run.modelName, messages, tools: this.#toolDefs, maxTokens: run.maxTokens, sessionId,
         ...(searchesLeft > 0 ? { webSearch: { maxSearches: searchesLeft } } : {}),
+        ...(run.reasoning ? { reasoning: run.reasoning } : {}),
       });
       cost += res.cost;
       searches += res.searches;
       for (const c of res.citations) if (!sources.has(c.url)) sources.set(c.url, c.title);
       store.logCall({
-        thread, model: res.model, promptTokens: res.promptTokens, completionTokens: res.completionTokens, cost: res.cost,
+        thread, room, model: res.model, promptTokens: res.promptTokens, completionTokens: res.completionTokens, cost: res.cost,
+        searches: res.searches, cachedTokens: res.cachedTokens, reasoningTokens: res.reasoningTokens,
         request: { model: run.modelName, messages }, response: res.message,
       }, this.#now());
       history.push(res.message);
 
       const calls = res.message.tool_calls ?? [];
       if (!calls.length) {
-        reply = anonymizer.deanonymize(thread, typeof res.message.content === "string" ? res.message.content : "");
+        const text = typeof res.message.content === "string" ? res.message.content.trim() : "";
+        // An empty reply would be stored as an empty assistant message, which providers reject on the next call
+        if (!text) history.pop();
+        reply = text ? anonymizer.deanonymize(thread, text) : NO_ANSWER;
         break;
       }
 
@@ -210,7 +256,7 @@ export class Agent {
 
     if (reply === undefined) reply = `I stopped after ${run.maxSteps} steps without finishing. Try a narrower request.`;
     if (history.at(-1)?.role !== "assistant") history.push({ role: "assistant", content: anonymizer.anonymize(thread, reply).text });
-    store.saveHistory(thread, room, trimHistory(history), this.#now().getTime());
+    store.saveHistory(thread, room, trimHistory(compactHistory(history)), this.#now().getTime());
 
     const alert = cost >= limits.alertCost
       ? `This request cost ${credits(cost)}, above the alert threshold of ${credits(limits.alertCost)}.`

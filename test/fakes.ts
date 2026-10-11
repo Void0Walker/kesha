@@ -76,7 +76,7 @@ export class ScriptedModel implements ChatModel {
     const step = this.#steps[this.requests.length - 1];
     if (!step) throw new Error(`ScriptedModel: no step ${this.requests.length}`);
     const reply = typeof step === "function" ? step(req) : step;
-    return { model: req.model, promptTokens: 10, completionTokens: 5, cost: this.#costPerCall, searches: 0, citations: [], ...reply };
+    return { model: req.model, promptTokens: 10, completionTokens: 5, cost: this.#costPerCall, searches: 0, citations: [], cachedTokens: 0, reasoningTokens: 0, ...reply };
   }
 
   /** Everything that was sent, as one string, for leak checks. */

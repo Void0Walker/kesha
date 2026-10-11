@@ -47,16 +47,21 @@ export function textToHtml(text: string): string {
 
 const dateOrNull = (d: string) => (d === NO_DATE || d.startsWith("0001-") ? null : d);
 
+// Default values are left out (not done, priority 0, no due date, no labels): they were ~40% of a task list's tokens.
+// The system prompt tells the model about the defaults
 function summarize(t: Task, withDescription = false) {
+  const due = dateOrNull(t.due_date);
+  const labels = (t.labels ?? []).map((l) => l.title);
+  const description = withDescription ? htmlToText(t.description ?? "") : "";
   return {
     id: t.id,
     title: t.title,
-    done: t.done,
-    due_date: dateOrNull(t.due_date),
-    priority: t.priority,
+    ...(t.done ? { done: true } : {}),
+    ...(due ? { due_date: due } : {}),
+    ...(t.priority ? { priority: t.priority } : {}),
     project_id: t.project_id,
-    labels: (t.labels ?? []).map((l) => l.title),
-    ...(withDescription ? { description: htmlToText(t.description ?? "") } : {}),
+    ...(labels.length ? { labels } : {}),
+    ...(description ? { description } : {}),
   };
 }
 
@@ -216,9 +221,21 @@ export async function runTool(tools: Tool[], name: string, rawArgs: unknown): Pr
   }
 }
 
+/** zod's JSON Schema without what costs tokens on every call and tells the model nothing: the $schema URL and the
+ * safe-integer bounds of .int(). */
+function leanSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(leanSchema);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([k, v]) => k !== "$schema" && !((k === "maximum" || k === "minimum") && Math.abs(v as number) === Number.MAX_SAFE_INTEGER))
+      .map(([k, v]) => [k, leanSchema(v)]),
+  );
+}
+
 export function toolDefinitions(tools: Tool[]) {
   return tools.map((t) => ({
     type: "function" as const,
-    function: { name: t.name, description: t.description, parameters: z.toJSONSchema(t.schema) as Record<string, unknown> },
+    function: { name: t.name, description: t.description, parameters: leanSchema(z.toJSONSchema(t.schema)) as Record<string, unknown> },
   }));
 }

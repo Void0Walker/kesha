@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { Agent, costFooter, type Limits, type ResearchProfile } from "../src/agent.ts";
+import { Agent, compactHistory, costFooter, sentAt, trimHistory, type Limits, type ResearchProfile } from "../src/agent.ts";
+import type { Message } from "../src/llm.ts";
 import { Anonymizer, parseDictionary } from "../src/anonymizer.ts";
 import { Store } from "../src/store.ts";
 import { createTools } from "../src/tools.ts";
@@ -133,7 +134,8 @@ describe("agent", () => {
     await agent.turn("t", "!room", "Jana's birthday is soon");
     await agent.turn("t", "!room", "What did I ask?");
     const second = model.requests[1]!.messages.map((m) => m.content);
-    assert.deepEqual(second.slice(1), ["<PERSON_1>'s birthday is soon", "Noted.", "What did I ask?"]);
+    const at = "[Tue 2026-10-06 12:00 +02:00]";
+    assert.deepEqual(second.slice(1), [`${at} <PERSON_1>'s birthday is soon`, "Noted.", `${at} What did I ask?`]);
     assert.doesNotMatch(JSON.stringify(store.getHistory("t")), /Jana/);
   });
 
@@ -283,5 +285,61 @@ describe("cost footer", () => {
 
   it("formats one search in the singular", () => {
     assert.equal(costFooter(0.0134, 1, 0.5, 2), "— $0.0134 · 1 search · today $0.5000 of $2.00");
+  });
+});
+
+describe("token savings", () => {
+  it("sends byte-identical system prompts and the same session id in every call of a conversation", async () => {
+    const model = new ScriptedModel([toolCall("list_projects", {}), say("Two projects (#1, #2)."), say("Sure.")]);
+    const { agent } = setup(model);
+    await agent.turn("t", "!room", "Which projects, Jana?");
+    await agent.turn("t", "!room", "thanks");
+    const systems = new Set(model.requests.map((r) => JSON.stringify(r.messages[0])));
+    assert.equal(systems.size, 1);
+    assert.doesNotMatch([...systems][0]!, /2026-10-06|Now:/);
+    const sessions = new Set(model.requests.map((r) => r.sessionId));
+    assert.equal(sessions.size, 1);
+    assert.match([...sessions][0]!, /^[0-9a-f]{32}$/);
+  });
+
+  it("drops earlier tool calls and results from later turns", async () => {
+    const model = new ScriptedModel([toolCall("list_projects", {}), say("Two projects."), say("ok")]);
+    const { store, agent } = setup(model);
+    await agent.turn("t", "!room", "Which projects?");
+    await agent.turn("t", "!room", "and now?");
+    const roles = model.requests[2]!.messages.map((m) => m.role);
+    assert.deepEqual(roles, ["system", "user", "assistant", "user"]);
+    assert.ok((store.getHistory("t") as Message[]).every((m) => m.role !== "tool"));
+  });
+
+  it("replaces an empty reply instead of storing an empty assistant message", async () => {
+    const model = new ScriptedModel([say("")]);
+    const { store, agent } = setup(model);
+    const res = await agent.turn("t", "!room", "hi");
+    assert.match(res.reply, /no answer/);
+    const last = (store.getHistory("t") as Message[]).at(-1)!;
+    assert.equal(last.role, "assistant");
+    assert.match(String(last.content), /no answer/);
+  });
+
+  it("keeps the start of the history stable until it is twice the trim size", () => {
+    const pair = (i: number): Message[] => [{ role: "user", content: `q${i} ${"x".repeat(1000)}` }, { role: "assistant", content: `a${i}` }];
+    const small = Array.from({ length: 10 }, (_, i) => pair(i)).flat();
+    assert.equal(trimHistory(small), small);
+    const big = Array.from({ length: 30 }, (_, i) => pair(i)).flat();
+    const trimmed = trimHistory(big);
+    assert.equal(trimmed[0]!.role, "user");
+    assert.ok(JSON.stringify(trimmed).length <= 12_000);
+    assert.equal(trimmed.at(-1), big.at(-1));
+  });
+
+  it("removes reasoning from stored replies", () => {
+    const h = [{ role: "assistant", content: "ok", reasoning_details: [{ type: "x" }] }] as unknown as Message[];
+    assert.deepEqual(compactHistory(h), [{ role: "assistant", content: "ok" }]);
+  });
+
+  it("stamps user messages with weekday, local time and offset", () => {
+    assert.equal(sentAt(new Date("2026-12-24T17:30:00Z"), "Europe/Berlin"), "Thu 2026-12-24 18:30 +01:00");
+    assert.equal(sentAt(new Date("2026-10-06T10:00:00Z"), "UTC"), "Tue 2026-10-06 10:00 +00:00");
   });
 });

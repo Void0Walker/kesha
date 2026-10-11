@@ -62,6 +62,13 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
 - **Notifications:** reminders and warnings go to the room set with `!notify-here`, release notes to the one set with
   `!releases-here`, otherwise to the room the user last wrote in.
 
+- **Token economy:** the system prompt and tool schemas are identical in every call (the send time goes on each user
+  message instead), so Anthropic models read them from the prompt cache at a tenth of the price, and OpenRouter keeps a
+  conversation on the same provider (`session_id`, a hash that can't be linked to Matrix ids). After each request only
+  the user messages and final replies are kept: tool calls and results aren't re-sent with every later message. Task
+  results leave out default fields. History over 24k characters is cut to ~12k at once, so its start stays cacheable.
+  Request bodies in the call log are blanked after 30 days, costs stay.
+
 Commands in a chat, answered without the model and free: `!help`, `!project [name|none]`, `!notify-here`,
 `!releases-here`, `!cost`. And `!research <question>`, which starts a research thread.
 
@@ -93,6 +100,9 @@ Environment variables:
 | `KESHA_RESEARCH_MAX_COST_PER_REQUEST` | `0.25` | credits (USD), search fees included |
 | `KESHA_RESEARCH_MAX_SEARCHES` | `6` | web searches per research request |
 | `KESHA_SEARCH_COST` | `0.007` | Exa's price per search, for the cost accounting |
+| `KESHA_PROMPT_CACHE` | `full` | Anthropic models: `full` caches system prompt and conversation, `system` only the prompt, `off` |
+| `KESHA_REASONING_EFFORT` | | task model: `off`, `low`, `medium`, `high`. Unset sends nothing (Haiku 5.5 doesn't reason by default; setting it on Anthropic models turns thinking on) |
+| `KESHA_RESEARCH_REASONING_EFFORT` | `medium` | same for the research model |
 | `KESHA_PII_FILE` | `/config/pii.yml` | the dictionary. Kesha refuses to start without it |
 | `KESHA_DATA_DIR` | `/data` | SQLite and Matrix stores |
 | `KESHA_TIMEZONE` | `Europe/Berlin` | for "tomorrow" and the daily cap |

@@ -2,6 +2,11 @@
 
 Kesha posts the section of a new version to the chat once it runs. Keep entries short and written for the user.
 
+## 0.6.0
+
+- Cheaper replies: my instructions and tools are now cached between messages (about a tenth of the price from the second message on), and I no longer re-send old task lists with every message. A longer conversation used about 70% fewer tokens in tests.
+- When I mention a task I add its number, like (#41), so you can refer to it later.
+
 ## 0.5.1
 
 - A noted decision stays an open task, since it usually still needs doing. Mark it done in Vikunja once it's acted on.
