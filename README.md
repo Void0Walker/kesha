@@ -37,7 +37,16 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
   "Rotate Kesha's Vikunja token" task in the inbox, due 3 days before expiry, and says so in Matrix.
   If Vikunja rejects the token later, Kesha stops using it and tells you.
 
-Commands in a chat: `!cost` shows today's spend.
+- **Research:** `!research <question>` starts a research thread. It uses `KESHA_RESEARCH_MODEL` with web search
+  (Exa through OpenRouter's `openrouter:web_search`, the engine that works with ZDR enforced) and the same task tools,
+  so findings can go straight into a task. Follow-ups in that thread stay in research mode. Searches are capped per
+  request, their sources are listed under the reply. Search queries come from the pseudonymized conversation, so
+  placeholders never reach the search engine as real names. Exa has its own retention policy, ZDR doesn't cover it.
+- **Cost in every reply:** each answer ends with what the request cost, the number of web searches, and today's total
+  against the daily cap, e.g. `— $0.0251 · 2 searches · today $0.1520 of $1.00`. OpenRouter's reported cost
+  sometimes leaves the search fees out, so Kesha adds `KESHA_SEARCH_COST` per search when it does.
+
+Commands in a chat: `!research <question>`, `!cost` shows today's spend.
 
 ## Configuration
 
@@ -60,7 +69,13 @@ Environment variables:
 | `KESHA_MAX_TOKENS` | `1500` | per model call |
 | `KESHA_MAX_COST_PER_REQUEST` | `0.25` | credits (USD) |
 | `KESHA_ALERT_COST` | `0.10` | warn when a request costs more |
-| `KESHA_DAILY_COST_CAP` | `1` | |
+| `KESHA_DAILY_COST_CAP` | `1` | shared by task and research requests |
+| `KESHA_RESEARCH_MODEL` | | OpenRouter model id for `!research`, needs a ZDR endpoint. Unset: research is off |
+| `KESHA_RESEARCH_MAX_STEPS` | `6` | model calls per research request |
+| `KESHA_RESEARCH_MAX_TOKENS` | `3000` | per model call |
+| `KESHA_RESEARCH_MAX_COST_PER_REQUEST` | `0.25` | credits (USD), search fees included |
+| `KESHA_RESEARCH_MAX_SEARCHES` | `6` | web searches per research request |
+| `KESHA_SEARCH_COST` | `0.007` | Exa's price per search, for the cost accounting |
 | `KESHA_PII_FILE` | `/config/pii.yml` | the dictionary. Kesha refuses to start without it |
 | `KESHA_DATA_DIR` | `/data` | SQLite and Matrix stores |
 | `KESHA_TIMEZONE` | `Europe/Berlin` | for "tomorrow" and the daily cap |

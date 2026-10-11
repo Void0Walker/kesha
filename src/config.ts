@@ -33,6 +33,16 @@ const Env = z.object({
   // No model calls once today's total reaches this
   KESHA_DAILY_COST_CAP: money(1),
 
+  // Model for !research threads, needs a ZDR endpoint like KESHA_MODEL. Unset: research is off
+  KESHA_RESEARCH_MODEL: z.string().min(1).optional(),
+  KESHA_RESEARCH_MAX_STEPS: z.coerce.number().int().positive().default(6),
+  KESHA_RESEARCH_MAX_TOKENS: z.coerce.number().int().positive().default(3000),
+  KESHA_RESEARCH_MAX_COST_PER_REQUEST: money(0.25),
+  // Web searches per research request, over all its model calls
+  KESHA_RESEARCH_MAX_SEARCHES: z.coerce.number().int().positive().default(6),
+  // Exa through OpenRouter, per search. Added to the cost when OpenRouter's reported cost leaves it out
+  KESHA_SEARCH_COST: money(0.007),
+
   KESHA_PII_FILE: z.string().default("/config/pii.yml"),
   KESHA_DATA_DIR: z.string().default("/data"),
   KESHA_TIMEZONE: z.string().default("Europe/Berlin"),

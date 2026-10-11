@@ -31,11 +31,23 @@ try {
   process.exit(1);
 }
 console.log("vikunja: token works");
+console.log(`models: ${config.KESHA_MODEL}, research ${config.KESHA_RESEARCH_MODEL ?? "off"}`);
 
 const anonymizer = new Anonymizer(dictionary, store);
 const agent = new Agent({
-  model: new OpenRouter(config.OPENROUTER_API_KEY, config.OPENROUTER_BASE_URL, config.OPENROUTER_ZDR),
+  model: new OpenRouter(config.OPENROUTER_API_KEY, config.OPENROUTER_BASE_URL, config.OPENROUTER_ZDR, config.KESHA_SEARCH_COST),
   modelName: config.KESHA_MODEL,
+  ...(config.KESHA_RESEARCH_MODEL
+    ? {
+        research: {
+          modelName: config.KESHA_RESEARCH_MODEL,
+          maxSteps: config.KESHA_RESEARCH_MAX_STEPS,
+          maxTokens: config.KESHA_RESEARCH_MAX_TOKENS,
+          maxCostPerRequest: config.KESHA_RESEARCH_MAX_COST_PER_REQUEST,
+          maxSearches: config.KESHA_RESEARCH_MAX_SEARCHES,
+        },
+      }
+    : {}),
   tools: createTools(vikunja, config.VIKUNJA_INBOX_PROJECT_ID, (term) => anonymizer.variants(term)),
   anonymizer,
   store,

@@ -11,7 +11,7 @@ export interface CallLog {
   response: unknown;
 }
 
-/** SQLite on the data volume: cost log, per-thread history and placeholder mapping, small key/value state. */
+/** SQLite on the data volume: cost log, per-thread history, mode and placeholder mapping, small key/value state. */
 export class Store {
   readonly db: DatabaseSync;
   readonly #timeZone: string;
@@ -33,6 +33,7 @@ export class Store {
         PRIMARY KEY (thread, placeholder));
       CREATE INDEX IF NOT EXISTS mappings_value ON mappings(thread, value);
       CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS thread_modes (thread TEXT PRIMARY KEY, mode TEXT NOT NULL);
     `);
   }
 
@@ -63,6 +64,16 @@ export class Store {
       .run(thread, room, now, JSON.stringify(history));
   }
 
+  /** "research" for threads started with !research, undefined for ordinary task threads. */
+  threadMode(thread: string): string | undefined {
+    const row = this.db.prepare("SELECT mode FROM thread_modes WHERE thread = ?").get(thread) as { mode: string } | undefined;
+    return row?.mode;
+  }
+
+  setThreadMode(thread: string, mode: string): void {
+    this.db.prepare("INSERT INTO thread_modes (thread, mode) VALUES (?,?) ON CONFLICT(thread) DO UPDATE SET mode = excluded.mode").run(thread, mode);
+  }
+
   findPlaceholder(thread: string, value: string): string | undefined {
     const row = this.db.prepare("SELECT placeholder FROM mappings WHERE thread = ? AND value = ?").get(thread, value) as { placeholder: string } | undefined;
     return row?.placeholder;
@@ -89,6 +100,7 @@ export class Store {
     for (const { thread } of idle) {
       this.db.prepare("DELETE FROM mappings WHERE thread = ?").run(thread);
       this.db.prepare("DELETE FROM threads WHERE thread = ?").run(thread);
+      this.db.prepare("DELETE FROM thread_modes WHERE thread = ?").run(thread);
     }
     return idle.length;
   }

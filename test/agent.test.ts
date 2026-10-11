@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { Agent, type Limits } from "../src/agent.ts";
+import { Agent, costFooter, type Limits, type ResearchProfile } from "../src/agent.ts";
 import { Anonymizer, parseDictionary } from "../src/anonymizer.ts";
 import { Store } from "../src/store.ts";
 import { createTools } from "../src/tools.ts";
@@ -11,13 +11,15 @@ const DICT = "people:\n  - names: [Jana Nováková, Jana]\n    forms: [Janě, Ja
 const LIMITS: Limits = { maxSteps: 5, maxTokens: 500, maxCostPerRequest: 0.05, alertCost: 0.02, dailyCap: 1 };
 const NOW = new Date("2026-10-06T10:00:00Z");
 
-function setup(model: ScriptedModel, limits: Partial<Limits> = {}) {
+const RESEARCH: ResearchProfile = { modelName: "test/research", maxSteps: 4, maxTokens: 2000, maxCostPerRequest: 0.2, maxSearches: 3 };
+
+function setup(model: ScriptedModel, limits: Partial<Limits> = {}, research?: ResearchProfile) {
   const store = new Store(":memory:", "Europe/Berlin");
   const v = new FakeVikunja();
   const anonymizer = new Anonymizer(parseDictionary(DICT), store);
   const agent = new Agent({
     model, modelName: "test/model", tools: createTools(v, 1, (t) => anonymizer.variants(t)), anonymizer,
-    store, limits: { ...LIMITS, ...limits }, timeZone: "Europe/Berlin", now: () => NOW,
+    store, limits: { ...LIMITS, ...limits }, timeZone: "Europe/Berlin", now: () => NOW, ...(research ? { research } : {}),
   });
   return { store, v, agent };
 }
@@ -126,5 +128,91 @@ describe("agent", () => {
     await agent.turn("old", "!room", "Jana");
     assert.equal(store.forgetIdleThreads(1000, NOW.getTime() + 2000), 1);
     assert.equal(store.lookupPlaceholder("old", "<PERSON_1>"), undefined);
+  });
+});
+
+describe("research", () => {
+  it("uses the research model with web search, lists sources and counts searches", async () => {
+    const model = new ScriptedModel([
+      (req) => {
+        assert.equal(req.model, "test/research");
+        assert.deepEqual(req.webSearch, { maxSearches: 3 });
+        assert.match(String(req.messages[0]!.content), /search the web/);
+        return {
+          ...say("Node 24 is the current LTS, supported until April 2028."), searches: 2, cost: 0.02,
+          citations: [{ url: "https://nodejs.org/en/about/previous-releases", title: "Node.js Releases" }, { url: "https://example.org/eol" }],
+        };
+      },
+    ]);
+    const { agent } = setup(model, {}, RESEARCH);
+    const res = await agent.turn("t", "!room", "Which Node.js version is LTS?", "research");
+    assert.equal(res.reply, [
+      "Node 24 is the current LTS, supported until April 2028.",
+      "",
+      "Sources:",
+      "1. Node.js Releases — https://nodejs.org/en/about/previous-releases",
+      "2. https://example.org/eol",
+    ].join("\n"));
+    assert.equal(res.searches, 2);
+    assert.equal(res.footer, "— $0.0200 · 2 searches · today $0.0200 of $1.00");
+  });
+
+  it("stops offering web search once the request used its searches", async () => {
+    const model = new ScriptedModel([
+      { ...toolCall("list_projects", {}), searches: 3 },
+      (req) => {
+        assert.equal(req.webSearch, undefined);
+        return say("Done.");
+      },
+    ]);
+    const { agent } = setup(model, {}, RESEARCH);
+    const res = await agent.turn("t", "!room", "dig deep", "research");
+    assert.equal(res.searches, 3);
+  });
+
+  it("applies the research cost cap instead of the task one", async () => {
+    // 0.06 per call is over the task cap (0.05) after one call, and over the research cap (0.2) after the fourth
+    const model = new ScriptedModel(Array.from({ length: 6 }, () => toolCall("list_projects", {})), 0.06);
+    const { agent } = setup(model, {}, { ...RESEARCH, maxSteps: 6 });
+    const res = await agent.turn("t", "!room", "loop", "research");
+    assert.equal(model.requests.length, 4);
+    assert.match(res.reply, /cost limit of \$0\.2000/);
+  });
+
+  it("never offers web search in task threads", async () => {
+    const model = new ScriptedModel([(req) => (assert.equal(req.webSearch, undefined), say("ok"))]);
+    const { agent } = setup(model, {}, RESEARCH);
+    await agent.turn("t", "!room", "hi");
+  });
+
+  it("says so when research is not configured", async () => {
+    const model = new ScriptedModel([]);
+    const { agent } = setup(model);
+    const res = await agent.turn("t", "!room", "anything", "research");
+    assert.equal(model.requests.length, 0);
+    assert.match(res.reply, /KESHA_RESEARCH_MODEL/);
+    assert.equal(res.footer, undefined);
+  });
+
+  it("forgets the mode of idle threads", async () => {
+    const { store, agent } = setup(new ScriptedModel([say("ok")]), {}, RESEARCH);
+    store.setThreadMode("old", "research");
+    await agent.turn("old", "!room", "hi", "research");
+    store.forgetIdleThreads(1000, NOW.getTime() + 2000);
+    assert.equal(store.threadMode("old"), undefined);
+  });
+});
+
+describe("cost footer", () => {
+  it("shows the request cost and today's total on task replies", async () => {
+    const model = new ScriptedModel([toolCall("list_projects", {}), say("Two projects.")], 0.004);
+    const { store, agent } = setup(model);
+    store.logCall({ thread: "x", model: "m", promptTokens: 1, completionTokens: 1, cost: 0.1, request: {}, response: {} }, NOW);
+    const res = await agent.turn("t", "!room", "Which projects?");
+    assert.equal(res.footer, "— $0.0080 · today $0.1080 of $1.00");
+  });
+
+  it("formats one search in the singular", () => {
+    assert.equal(costFooter(0.0134, 1, 0.5, 2), "— $0.0134 · 1 search · today $0.5000 of $2.00");
   });
 });

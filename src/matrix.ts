@@ -107,7 +107,14 @@ export class Bot {
     store.setState("alert-room", roomId);
 
     if (body === "!cost") {
-      await reply(`Spent today: $${agent.spentToday().toFixed(4)}`);
+      await reply(`Spent today: $${agent.spentToday().toFixed(4)} of $${agent.dailyCap.toFixed(2)}`);
+      return;
+    }
+    // !research <question> turns the thread into a research thread: the research model, with web search
+    const research = /^!research\b\s*([\s\S]*)$/i.exec(body);
+    const text = research ? research[1]!.trim() : body;
+    if (research && !text) {
+      await reply("Usage: !research <question>. Follow-ups in the same thread stay in research mode.");
       return;
     }
     if (this.#vikunjaDown) {
@@ -115,13 +122,16 @@ export class Bot {
       return;
     }
 
+    if (research) store.setThreadMode(thread, "research");
+    const mode = store.threadMode(thread) === "research" ? "research" : "task";
+
     const previous = this.#queues.get(thread) ?? Promise.resolve();
     const run = previous.then(async () => {
       await this.client.setTyping(roomId, true, 30_000).catch(() => {});
       try {
-        const res = await agent.turn(thread, roomId, body);
+        const res = await agent.turn(thread, roomId, text, mode);
         if (res.tokenDead) this.#vikunjaDown = true;
-        await reply(res.alert ? `${res.reply}\n\n⚠️ ${res.alert}` : res.reply);
+        await reply([res.reply, res.footer, res.alert && `⚠️ ${res.alert}`].filter(Boolean).join("\n\n"));
       } catch (e) {
         console.error("turn failed:", e);
         await reply("Something went wrong on my side, nothing was changed after the error. Details are in my logs.");
