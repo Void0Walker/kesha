@@ -2,6 +2,10 @@
 
 Kesha posts the section of a new version to the chat once it runs. Keep entries short and written for the user.
 
+## 0.5.1
+
+- A noted decision stays an open task, since it usually still needs doing. Mark it done in Vikunja once it's acted on.
+
 ## 0.5.0
 
 - Say "note that decision" (or similar) and I record it as a finished task in the room's project: "Decision: …", with what was decided, why, what was ruled out, and the date. A summary, never the conversation itself.

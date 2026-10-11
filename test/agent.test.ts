@@ -230,21 +230,28 @@ describe("research", () => {
 });
 
 describe("decisions", () => {
-  it("records a decision as a done task in the room's project, also when Vikunja ignores done on create", async () => {
+  it("records a decision as an open task in the room's project", async () => {
     const model = new ScriptedModel([
       (req) => {
-        assert.match(String(req.messages[0]!.content), /note or record a decision, create one task, already done/);
-        return toolCall("create_task", { title: "Decision: Bosch dishwasher", description: "Quieter, fits the niche. Ruled out: Miele (price). 2026-10-06", done: true });
+        assert.match(String(req.messages[0]!.content), /note or record a decision, create one open task \(not done\)/);
+        return toolCall("create_task", { title: "Decision: Bosch dishwasher", description: "Quieter, fits the niche. Ruled out: Miele (price). 2026-10-06" });
       },
       say("Noted the decision."),
     ]);
     const { v, agent } = setup(model);
-    const create = v.createTask.bind(v);
-    v.createTask = (pid, fields) => create(pid, { ...fields, done: false });
     await agent.turn("t", "!room", "note that decision", "task", { id: 2, title: "Home appliances" });
     const task = [...v.tasks.values()].find((t) => t.title === "Decision: Bosch dishwasher")!;
-    assert.equal(task.done, true);
+    assert.equal(task.done, false);
     assert.equal(task.project_id, 2);
+  });
+
+  it("creates a task as done when asked, also when Vikunja ignores done on create", async () => {
+    const model = new ScriptedModel([toolCall("create_task", { title: "Paid the electricity bill", done: true }), say("Logged.")]);
+    const { v, agent } = setup(model);
+    const create = v.createTask.bind(v);
+    v.createTask = (pid, fields) => create(pid, { ...fields, done: false });
+    await agent.turn("t", "!room", "log that I already paid the electricity bill");
+    assert.equal([...v.tasks.values()][0]!.done, true);
   });
 });
 

@@ -80,7 +80,7 @@ function systemPrompt(now: Date, timeZone: string, mode: Mode, project?: RoomPro
     "Some tasks are private. You can't see or change them; if a tool says a task is private, tell the user to handle it in Vikunja themselves.",
     "Only create or change tasks when the user asks you to. Talking about something is not a request to add a task.",
     "Before changing or creating tasks, look up ids with the tools instead of guessing. After a change, confirm briefly what was done.",
-    "When the user asks you to note or record a decision, create one task, already done: title \"Decision: \" and the decision in a few words; description with what was decided, the main reasons, the options ruled out, and today's date. Summarize, never copy the conversation into it.",
+    "When the user asks you to note or record a decision, create one open task (not done): title \"Decision: \" and the decision in a few words; description with what was decided, the main reasons, the options ruled out, and today's date. Summarize, never copy the conversation into it. Only create a task as done when the user says it is already done.",
     ...(project
       ? [`This chat room belongs to the project "${project.title}" (id ${project.id}): new tasks go there unless the user names another project, and questions about tasks are about that project unless the user says otherwise.`]
       : []),
