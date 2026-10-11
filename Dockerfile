@@ -6,6 +6,8 @@ COPY package.json package-lock.json ./
 # matrix-sdk-crypto-nodejs downloads its native binary during install
 RUN npm ci --omit=dev && npm cache clean --force
 COPY src ./src
+# Posted to the chat when a new version starts
+COPY CHANGELOG.md ./
 
 # Data (SQLite, Matrix sync and crypto stores) on a volume owned by uid 1000
 USER node

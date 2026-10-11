@@ -68,14 +68,16 @@ export class Bot {
     this.client.stop();
   }
 
-  /** Message to the user outside a conversation (token expiry, Vikunja down): goes to the room they last used. */
-  async notify(text: string): Promise<void> {
+  /** Message to the user outside a conversation (token expiry, Vikunja down, new version): goes to the room they
+   * last used. False when there is none yet. */
+  async notify(text: string): Promise<boolean> {
     const room = this.#o.store.getState("alert-room");
     if (!room) {
       console.warn(`no room to notify yet, message was: ${text}`);
-      return;
+      return false;
     }
     await this.client.sendMessage(room, { msgtype: "m.notice", body: text });
+    return true;
   }
 
   setVikunjaDown(down: boolean): void {

@@ -7,6 +7,7 @@ import { loadConfig } from "./config.ts";
 import { checkTokenExpiry } from "./expiry.ts";
 import { OpenRouter } from "./llm.ts";
 import { Bot } from "./matrix.ts";
+import { announceRelease } from "./release.ts";
 import { Store } from "./store.ts";
 import { createTools } from "./tools.ts";
 import { Vikunja, VikunjaAuthError } from "./vikunja.ts";
@@ -15,6 +16,8 @@ const IDLE_THREAD_MS = 30 * 86_400_000;
 const HOUSEKEEPING_MS = 6 * 3_600_000;
 
 const config = loadConfig();
+const version = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
+console.log(`kesha ${version}`);
 LogService.setLevel(LogLevel.WARN);
 mkdirSync(config.KESHA_DATA_DIR, { recursive: true });
 
@@ -70,6 +73,12 @@ const bot = new Bot({
   store,
 });
 await bot.start();
+try {
+  const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
+  if ((await announceRelease({ version, changelog, store, notify: (t) => bot.notify(t) })) === "announced") console.log(`announced ${version}`);
+} catch (e) {
+  console.error("release announcement failed:", e);
+}
 
 async function housekeeping() {
   const forgotten = store.forgetIdleThreads(IDLE_THREAD_MS);
@@ -81,7 +90,7 @@ async function housekeeping() {
       store,
       vikunja,
       inboxProjectId: config.VIKUNJA_INBOX_PROJECT_ID,
-      notify: (text) => bot.notify(text),
+      notify: async (text) => void (await bot.notify(text)),
     });
     if (r === "reminded") console.log("vikunja: token rotation reminder created");
   } catch (e) {

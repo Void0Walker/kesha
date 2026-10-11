@@ -50,6 +50,9 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
   against the daily cap, e.g. `— $0.0251 · 2 searches · today $0.1520 of $1.00`. OpenRouter's reported cost
   sometimes leaves the search fees out, so Kesha adds `KESHA_SEARCH_COST` per search when it does.
 
+- **Release notes:** when a new version starts, Kesha posts its section of `CHANGELOG.md` to the room you last wrote
+  in, once per version.
+
 Commands in a chat: `!research <question>`, `!cost` shows today's spend.
 
 ## Configuration
@@ -114,4 +117,5 @@ Test fixtures must stay fictional. Real task texts and the real dictionary never
 
 ## Releases
 
-Push a tag `vX.Y.Z`. GitHub Actions runs the tests and publishes `ghcr.io/void0walker/kesha:X.Y.Z` (public, amd64).
+Add a `## X.Y.Z` section to `CHANGELOG.md` (what the user notices, Kesha posts it to the chat), bump `package.json`,
+push a tag `vX.Y.Z`. GitHub Actions runs the tests and publishes `ghcr.io/void0walker/kesha:X.Y.Z` (public, amd64).
