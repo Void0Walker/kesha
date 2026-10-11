@@ -2,6 +2,17 @@
 
 Kesha posts the section of a new version to the chat once it runs. Keep entries short and written for the user.
 
+## 1.0.0
+
+First stable release. What I can do:
+
+- Your Vikunja tasks from Matrix in plain language: find, add, change, finish, move, note decisions. Each room is one conversation; `!project <name>` ties a room to a project.
+- `!today`, `!week`, `!open` list tasks instantly and free; `!undo` takes back my last changes.
+- `!r <question>` researches with web search and lists sources.
+- Privacy: names and details from your dictionary and personal data like emails and phone numbers are replaced before anything reaches the model; tasks labelled private never do. Only providers that keep no data are used.
+- Costs: every reply shows what it cost; daily cap, per-request caps, `!cost` and `!cost week`; cached prompts keep most messages at a fraction of a cent.
+- `!help` lists all commands.
+
 ## 0.8.1
 
 - `!undo` can be continued if Vikunja fails halfway: send it again. After an undo I know the change was taken back.
