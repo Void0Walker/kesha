@@ -16,6 +16,14 @@ export interface RoomProject {
 }
 
 const projectKey = (room: string) => `room-project:${room}`;
+const modeKey = (room: string) => `room-mode:${room}`;
+
+export type RoomMode = "tasks" | "letters";
+
+/** What a room is for, set with !mode. Tasks unless set otherwise. */
+export function roomMode(store: Store, room: string): RoomMode {
+  return store.getState(modeKey(room)) === "letters" ? "letters" : "tasks";
+}
 
 /** The project new tasks in this room go to, set with !project. */
 export function roomProject(store: Store, room: string): RoomProject | undefined {
@@ -34,6 +42,7 @@ export function help(idleHours: number): string {
     "",
     "- `!r <question>` or `!research <question>`: answer this message with web search",
     "- `!project <name>`: new tasks in this room go to that project. `!project` shows it, `!project none` removes it",
+    "- `!mode letters`: this room drafts letters and emails (formal Czech by default). `!mode tasks` switches back, `!mode` shows it",
     "- `!today`, `!week`, `!open`: what's due today, this week, or all open tasks (this room's project, or all)",
     "- `!undo`: undo my last change in this room",
     "- `!new`: start a fresh conversation in this room",
@@ -91,6 +100,8 @@ export async function runCommand(d: CommandDeps, room: string, body: string): Pr
       return `Release notes go to this room from now on.\n\n${releaseText(d.version, d.changelog)}`;
     case "project":
       return projectCommand(d, room, arg);
+    case "mode":
+      return modeCommand(d, room, arg);
     default:
       return `I don't know !${name}.\n\n${help(d.idleHours)}`;
   }
@@ -179,4 +190,20 @@ async function undo(d: CommandDeps, room: string): Promise<string> {
     addConversationNote(d.store, conversation, `the user sent !undo, which reverted my last changes. ${r.message.replace(/\n/g, " ")}`);
   }
   return r.message;
+}
+
+function modeCommand(d: CommandDeps, room: string, arg: string): string {
+  const current = roomMode(d.store, room);
+  const describe = (m: RoomMode) => (m === "letters" ? "drafting letters and emails" : "tasks");
+  if (!arg) return `This room is for ${describe(current)}. Switch with !mode letters or !mode tasks.`;
+  const next = arg.toLowerCase();
+  if (next !== "letters" && next !== "tasks") return "Use !mode letters or !mode tasks.";
+  if (next === current) return `This room is already for ${describe(current)}.`;
+  if (next === "letters") d.store.setState(modeKey(room), "letters");
+  else d.store.deleteState(modeKey(room));
+  // Different instructions: start clean instead of carrying the other mode's conversation along
+  d.newConversation();
+  return next === "letters"
+    ? "This room now drafts letters and emails, formal Czech unless you ask otherwise. Describe who it's for and what you need; send !new before the next letter."
+    : "This room is for tasks again.";
 }

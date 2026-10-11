@@ -31,7 +31,8 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
   They never reach the model.
 - **Pseudonymization** at the OpenRouter boundary, both directions:
   - names, places, organisations from a YAML dictionary (with inflected forms), plus regexes for emails, phone
-    numbers, IBANs, card numbers, IPs and URLs with tokens, become placeholders like `<PERSON_1>`;
+    numbers, IBANs, card numbers, IPs, URLs with tokens and Czech/Slovak birth numbers (`YYMMDD/XXXX`), become
+    placeholders like `<PERSON_1>`;
   - placeholders are numbered per conversation and stored in SQLite, so the same person can't be linked across
     conversations. Mappings and history of an ended conversation are deleted an hour later, of any conversation after
     30 idle days;
@@ -79,6 +80,10 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
 - **Room snapshot:** in a room with a project, the first message of a conversation carries the project's open tasks
   (the 30 due soonest, pseudonymized, private ones left out), and again after a change or 30 minutes. It's stored in the
   history like the message, so the cached prefix stays stable.
+- **Letter rooms:** `!mode letters` gives a room instructions for drafting letters and emails (formal Czech by default:
+  subject line, greeting by title rather than name, since placeholders come back in the nominative and Czech greetings
+  need the vocative, gaps marked `[doplnit: …]`) and `KESHA_LETTERS_MODEL`. Task tools stay available. Switching the
+  mode starts a new conversation.
 - **Notifications:** reminders and warnings go to the room set with `!notify-here`, release notes to the one set with
   `!releases-here`, otherwise to the room the user last wrote in.
 
@@ -90,7 +95,7 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
   Request bodies in the call log are blanked after 30 days, costs stay.
 
 Commands in a chat, answered without the model and free: `!help`, `!today`, `!week`, `!open`, `!undo`, `!new`,
-`!project [name|none]`, `!notify-here`, `!releases-here`, `!cost`, `!cost week`. And `!research <question>` / `!r <question>`, which use the research model.
+`!project [name|none]`, `!mode [letters|tasks]`, `!notify-here`, `!releases-here`, `!cost`, `!cost week`. And `!research <question>` / `!r <question>`, which use the research model.
 
 ## Configuration
 
@@ -121,6 +126,11 @@ Environment variables:
 | `KESHA_RESEARCH_MAX_COST_PER_REQUEST` | `0.25` | credits (USD), search fees included |
 | `KESHA_RESEARCH_MAX_SEARCHES` | `6` | web searches per research request |
 | `KESHA_SEARCH_COST` | `0.007` | Exa's price per search, for the cost accounting |
+| `KESHA_LETTERS_MODEL` | `KESHA_MODEL` | model for rooms set with `!mode letters`, needs a ZDR endpoint |
+| `KESHA_LETTERS_MAX_STEPS` | `4` | model calls per request in letter rooms |
+| `KESHA_LETTERS_MAX_TOKENS` | `3000` | per model call |
+| `KESHA_LETTERS_MAX_COST_PER_REQUEST` | `0.25` | credits (USD) |
+| `KESHA_LETTERS_REASONING_EFFORT` | | like `KESHA_REASONING_EFFORT` |
 | `KESHA_PROMPT_CACHE` | `full` | Anthropic models: `full` caches system prompt and conversation, `system` only the prompt, `off` |
 | `KESHA_REASONING_EFFORT` | | task model: `off`, `low`, `medium`, `high`. Unset sends nothing (Haiku 5.5 doesn't reason by default; setting it on Anthropic models turns thinking on) |
 | `KESHA_RESEARCH_REASONING_EFFORT` | `medium` | same for the research model |

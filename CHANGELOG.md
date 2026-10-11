@@ -2,6 +2,11 @@
 
 Kesha posts the section of a new version to the chat once it runs. Keep entries short and written for the user.
 
+## 1.1.0
+
+- Letter rooms: `!mode letters` turns a room into a writing desk for emails and letters to officials, doctors and other important people, in formal Czech unless you ask otherwise. Describe what you need, refine the draft ("more polite", "add the case number"), `!new` before the next letter. Drafts use a stronger model and cost about a cent. `!mode tasks` switches back.
+- Czech birth numbers (rodné číslo, like 855612/1234) are now replaced before anything reaches the model, like emails and phone numbers.
+
 ## 1.0.0
 
 First stable release. What I can do:

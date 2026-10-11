@@ -109,3 +109,20 @@ describe("search variants", () => {
     assert.deepEqual(a.variants("milk"), ["milk"]);
   });
 });
+
+describe("Czech birth numbers", () => {
+  it("replaces them, with or without spaces around the slash, and restores them", () => {
+    const store = new Store(":memory:", "Europe/Berlin");
+    const a = new Anonymizer(parseDictionary(""), store);
+    const out = a.anonymize("t", "RČ 855612/1234 a 040115 / 123").text;
+    assert.equal(out, "RČ <ID_1> a <ID_2>");
+    assert.equal(a.deanonymize("t", "Číslo: <ID_1>"), "Číslo: 855612/1234");
+  });
+
+  it("leaves dates, plain numbers and file numbers alone", () => {
+    const store = new Store(":memory:", "Europe/Berlin");
+    const a = new Anonymizer(parseDictionary(""), store);
+    const text = "11.10.2026, č.j. 12/2026, 8556121234, 1234567/123456";
+    assert.equal(a.anonymize("t", text).text, text);
+  });
+});

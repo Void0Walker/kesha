@@ -16,7 +16,7 @@ export interface Limits {
   reasoning?: ReasoningEffort;
 }
 
-// Model and per-request caps for !research messages, which may search the web
+// Model and per-request caps for a kind of request: !research messages (which may search the web), letter rooms
 export interface ResearchProfile {
   modelName: string;
   maxSteps: number;
@@ -27,13 +27,18 @@ export interface ResearchProfile {
   reasoning?: ReasoningEffort;
 }
 
-export type Mode = "task" | "research";
+export type ModelProfile = ResearchProfile;
+
+// research: one !r message. letters: a room set with !mode letters, for drafting formal letters and emails
+export type Mode = "task" | "research" | "letters";
 
 export interface AgentDeps {
   model: ChatModel;
   modelName: string;
   // Unset: research is off
   research?: ResearchProfile;
+  // Unset: letter rooms use the task model with the letter instructions
+  letters?: ModelProfile;
   tools: Tool[];
   // Open, non-private tasks of a project, for the room snapshot. Unset: no snapshot
   listOpenTasks?(projectId: number): Promise<Task[]>;
@@ -108,7 +113,15 @@ export function systemPrompt(mode: Mode, project?: RoomProject): string {
           "Placeholders mean nothing outside this chat: never put them in search queries. If a question depends on who a placeholder is, search for the general topic.",
           "Lead with the answer, then the key facts. Simple Markdown is fine (**bold**, lists); no tables or headings. Sources are listed under your reply automatically, don't list URLs yourself.",
         ]
-      : ["Keep replies short. Simple Markdown is fine (**bold**, *italic*, lists, links); no tables or headings."]),
+      : mode === "letters"
+        ? [
+            "This room is for drafting letters and emails, often to officials, authorities, doctors and other important people. Write the draft in the language the user asks for, by default formal Czech; talk to the user in their language.",
+            "Draft: a subject line (\"Předmět: …\"), the greeting, a concise body with one point per paragraph, a closing (\"S pozdravem\" or, to high officials, \"S úctou\"), and the sender's name if the user gave it. Formal \"Vy\" with a capital V to a single person. Polite, clear and specific, no clichés or filler.",
+            "Greet with a title, not a name: placeholders come back in their basic form and can't be put in the vocative. \"Vážená paní doktorko,\", \"Vážený pane řediteli,\", \"Vážená paní,\" or \"Dobrý den,\" when you don't know who reads it. In the body, use a placeholder only where the basic form fits (\"paní <PERSON_1> mi sdělila\"); rephrase sentences that would need another case.",
+            "If something essential is missing (dates, case or file numbers, what exactly is being asked for), ask briefly first, or mark gaps like [doplnit: datum] in the draft.",
+            "Reply with the draft first, ready to copy, then at most two short lines of notes. Refine the draft when asked. You never send anything; the user does. You can still manage tasks here, e.g. a reminder to send the letter.",
+          ]
+        : ["Keep replies short. Simple Markdown is fine (**bold**, *italic*, lists, links); no tables or headings."]),
     ...(project
       ? [`This chat room belongs to the project "${project.title}" (id ${project.id}): new tasks go there unless the user names another project, and questions about tasks are about that project unless the user says otherwise.`]
       : []),
@@ -219,8 +232,9 @@ export class Agent {
     if (mode === "research" && !research) {
       return { reply: "Research is not set up: KESHA_RESEARCH_MODEL is empty.", cost: 0, searches: 0 };
     }
-    const run = mode === "research" && research
-      ? research
+    const profile = mode === "research" ? research : mode === "letters" ? this.#d.letters : undefined;
+    const run = profile
+      ? profile
       : {
           modelName: this.#d.modelName, maxSteps: limits.maxSteps, maxTokens: limits.maxTokens, maxCostPerRequest: limits.maxCostPerRequest,
           maxSearches: 0, ...(limits.reasoning ? { reasoning: limits.reasoning } : {}),

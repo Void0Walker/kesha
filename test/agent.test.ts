@@ -17,14 +17,14 @@ const NOW = new Date("2026-10-06T10:00:00Z");
 
 const RESEARCH: ResearchProfile = { modelName: "test/research", maxSteps: 4, maxTokens: 2000, maxCostPerRequest: 0.2, maxSearches: 3 };
 
-function setup(model: ScriptedModel, limits: Partial<Limits> = {}, research?: ResearchProfile) {
+function setup(model: ScriptedModel, limits: Partial<Limits> = {}, research?: ResearchProfile, letters?: ResearchProfile) {
   const store = new Store(":memory:", "Europe/Berlin");
   const v = new FakeVikunja();
   const listOpenTasks = async (projectId: number) => (await openTasks(v, projectId, 2)).tasks;
   const anonymizer = new Anonymizer(parseDictionary(DICT), store);
   const agent = new Agent({
     model, modelName: "test/model", tools: createTools(v, 1, (t) => anonymizer.variants(t)), anonymizer, listOpenTasks,
-    store, limits: { ...LIMITS, ...limits }, timeZone: "Europe/Berlin", now: () => NOW, ...(research ? { research } : {}),
+    store, limits: { ...LIMITS, ...limits }, timeZone: "Europe/Berlin", now: () => NOW, ...(research ? { research } : {}), ...(letters ? { letters } : {}),
   });
   return { store, v, agent };
 }
@@ -505,5 +505,35 @@ describe("0.8.1 fixes", () => {
     const task = (id: number, due?: string) => ({ id, title: `T${id}`, description: "", done: false, priority: 0, project_id: 2, labels: null, due_date: due ?? "0001-01-01T00:00:00Z" });
     const text = snapshotText([task(1), task(2, "2026-10-20T10:00:00Z"), task(3, "2026-10-12T10:00:00Z")], "now", "Europe/Berlin");
     assert.match(text, /: #3 T3 · due 2026-10-12; #2 T2 · due 2026-10-20; #1 T1\)$/);
+  });
+});
+
+describe("letters rooms", () => {
+  const LETTERS: ResearchProfile = { modelName: "test/writer", maxSteps: 3, maxTokens: 3000, maxCostPerRequest: 0.25, maxSearches: 0 };
+
+  it("drafts with the letters model and instructions, names restored, no web search", async () => {
+    const model = new ScriptedModel([
+      (req) => {
+        assert.equal(req.model, "test/writer");
+        assert.equal(req.maxTokens, 3000);
+        assert.equal(req.webSearch, undefined);
+        const system = String(req.messages[0]!.content);
+        assert.match(system, /drafting letters and emails/);
+        assert.match(system, /Vážená paní doktorko/);
+        assert.doesNotMatch(system, /Keep replies short/);
+        assert.match(String(req.messages.at(-1)!.content), /<PERSON_1>/);
+        return say("Předmět: Žádost o kopii zprávy\n\nVážená paní doktorko,\n\npaní <PERSON_1> mi sdělila …\n\nS pozdravem");
+      },
+    ]);
+    const { agent } = setup(model, {}, undefined, LETTERS);
+    const res = await agent.turn("c", "!room", "Napiš e-mail lékařce, Jana mi řekla, že mám požádat o kopii zprávy", "letters");
+    assert.match(res.reply, /paní Jana Nováková mi sdělila/);
+    assert.doesNotMatch(model.sent(), /Jana/);
+  });
+
+  it("uses the task model with the letter instructions when no letters model is set", async () => {
+    const model = new ScriptedModel([(req) => (assert.equal(req.model, "test/model"), assert.match(String(req.messages[0]!.content), /drafting letters/), say("ok"))]);
+    const { agent } = setup(model);
+    await agent.turn("c", "!room", "draft something", "letters");
   });
 });

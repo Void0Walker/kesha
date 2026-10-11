@@ -47,6 +47,13 @@ const Env = z.object({
   // Web searches per research request, over all its model calls
   KESHA_RESEARCH_MAX_SEARCHES: z.coerce.number().int().positive().default(6),
   KESHA_RESEARCH_REASONING_EFFORT: z.enum(["off", "low", "medium", "high"]).default("medium"),
+
+  // Rooms set with !mode letters. Unset model: the task model, with the letter instructions
+  KESHA_LETTERS_MODEL: z.string().min(1).optional(),
+  KESHA_LETTERS_MAX_STEPS: z.coerce.number().int().positive().default(4),
+  KESHA_LETTERS_MAX_TOKENS: z.coerce.number().int().positive().default(3000),
+  KESHA_LETTERS_MAX_COST_PER_REQUEST: money(0.25),
+  KESHA_LETTERS_REASONING_EFFORT: z.enum(["off", "low", "medium", "high"]).optional(),
   // Exa through OpenRouter, per search. Added to the cost when OpenRouter's reported cost leaves it out
   KESHA_SEARCH_COST: money(0.007),
 

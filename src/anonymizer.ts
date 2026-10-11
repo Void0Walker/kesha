@@ -5,7 +5,7 @@ import { z } from "zod";
 // structured PII (emails, phone numbers, ...) from regexes. Placeholders are numbered per conversation, so the
 // same person is <PERSON_1> throughout one conversation but can't be linked across conversations.
 
-export type Kind = "PERSON" | "PLACE" | "ORG" | "OTHER" | "EMAIL" | "PHONE" | "IBAN" | "CARD" | "IP" | "URL";
+export type Kind = "PERSON" | "PLACE" | "ORG" | "OTHER" | "EMAIL" | "PHONE" | "IBAN" | "CARD" | "IP" | "URL" | "ID";
 
 export interface DictionaryEntry {
   kind: Kind;
@@ -63,6 +63,9 @@ const PATTERNS: Pattern[] = [
   { kind: "EMAIL", re: /[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.[\p{L}]{2,}/gu },
   { kind: "IBAN", re: /\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?\b/g },
   { kind: "CARD", re: /\b\d(?:[ -]?\d){12,18}\b/g, accept: (m) => luhn(m.replace(/\D/g, "")) },
+  // Czech/Slovak birth number (rodné číslo) YYMMDD/XXX(X), months +50 for women, +20/+70 since 2004. The slash is
+  // required, so ordinary 10-digit numbers aren't taken for one
+  { kind: "ID", re: /(?<!\d)\d{2}[0-7]\d[0-3]\d ?\/ ?\d{3,4}(?!\d)/g },
   // IPv4, full IPv6, compressed IPv6
   { kind: "IP", re: /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b|\b(?:[0-9a-f]{1,4}:){4,7}[0-9a-f]{1,4}\b|\b(?:[0-9a-f]{1,4}:){1,6}:(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*)?\b/gi },
   // International numbers, and 9-digit national numbers in groups of three (CZ/SK style)

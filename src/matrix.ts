@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { MatrixClient, RustSdkCryptoStorageProvider, SimpleFsStorageProvider } from "matrix-bot-sdk";
 import type { Agent } from "./agent.ts";
-import { notifyRoom, roomProject, runCommand, type NotifyKind } from "./commands.ts";
+import { notifyRoom, roomMode, roomProject, runCommand, type NotifyKind } from "./commands.ts";
 import { currentConversation } from "./conversation.ts";
 import { replyContent, type FormatOptions, type MatrixText } from "./format.ts";
 import type { Store } from "./store.ts";
@@ -171,7 +171,8 @@ export class Bot {
     const progress = research ? await send({ ...replyContent("Researching…", format, undefined, undefined, "m.notice") }).catch(() => undefined) : undefined;
     let outcome = "Research failed.";
     try {
-      const res = await agent.turn(conversation, roomId, text, research ? "research" : "task", roomProject(store, roomId));
+      const mode = research ? "research" : roomMode(store, roomId) === "letters" ? "letters" : "task";
+      const res = await agent.turn(conversation, roomId, text, mode, roomProject(store, roomId));
       if (res.tokenDead) this.#vikunjaDown = true;
       await send(replyContent(res.reply, format, res.footer, res.alert));
       outcome = `Research done: ${res.searches} ${res.searches === 1 ? "search" : "searches"}, $${res.cost.toFixed(4)}.`;

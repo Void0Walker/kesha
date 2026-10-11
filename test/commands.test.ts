@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { help, notifyRoom, roomProject, runCommand, type CommandDeps } from "../src/commands.ts";
+import { help, notifyRoom, roomMode, roomProject, runCommand, type CommandDeps } from "../src/commands.ts";
 import { announceRelease } from "../src/release.ts";
 import { openTasks } from "../src/tools.ts";
 import { Store } from "../src/store.ts";
@@ -175,5 +175,20 @@ describe("calendar days and long lists", () => {
     const few = await openTasks(v, undefined, 2);
     assert.deepEqual([few.tasks.length, few.complete], [100, false]);
     assert.doesNotMatch((await runCommand(deps, "!a", "!open"))!, /may miss some/);
+  });
+});
+
+describe("!mode", () => {
+  it("switches a room to letters and back, starting a new conversation each time", async () => {
+    const { store, run, newConversations } = setup();
+    assert.match((await run("!mode"))!, /This room is for tasks/);
+    assert.match((await run("!mode letters"))!, /now drafts letters and emails, formal Czech/);
+    assert.equal(roomMode(store, "!a"), "letters");
+    assert.equal(roomMode(store, "!b"), "tasks");
+    assert.match((await run("!mode letters"))!, /already for drafting letters/);
+    assert.match((await run("!mode tasks"))!, /for tasks again/);
+    assert.equal(roomMode(store, "!a"), "tasks");
+    assert.equal(newConversations(), 2);
+    assert.match((await run("!mode poems"))!, /Use !mode letters or !mode tasks/);
   });
 });

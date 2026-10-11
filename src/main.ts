@@ -42,7 +42,7 @@ try {
   process.exit(1);
 }
 console.log("vikunja: token works");
-console.log(`models: ${config.KESHA_MODEL}, research ${config.KESHA_RESEARCH_MODEL ?? "off"}`);
+console.log(`models: ${config.KESHA_MODEL}, research ${config.KESHA_RESEARCH_MODEL ?? "off"}, letters ${config.KESHA_LETTERS_MODEL ?? config.KESHA_MODEL}`);
 
 const anonymizer = new Anonymizer(dictionary, store);
 const agent = new Agent({
@@ -51,6 +51,14 @@ const agent = new Agent({
     searchCost: config.KESHA_SEARCH_COST, promptCache: config.KESHA_PROMPT_CACHE,
   }),
   modelName: config.KESHA_MODEL,
+  letters: {
+    modelName: config.KESHA_LETTERS_MODEL ?? config.KESHA_MODEL,
+    maxSteps: config.KESHA_LETTERS_MAX_STEPS,
+    maxTokens: config.KESHA_LETTERS_MAX_TOKENS,
+    maxCostPerRequest: config.KESHA_LETTERS_MAX_COST_PER_REQUEST,
+    maxSearches: 0,
+    ...(config.KESHA_LETTERS_REASONING_EFFORT ? { reasoning: config.KESHA_LETTERS_REASONING_EFFORT } : {}),
+  },
   ...(config.KESHA_RESEARCH_MODEL
     ? {
         research: {
