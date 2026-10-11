@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { help, notifyRoom, roomProject, runCommand, type CommandDeps } from "../src/commands.ts";
 import { announceRelease } from "../src/release.ts";
+import { openTasks } from "../src/tools.ts";
 import { Store } from "../src/store.ts";
 import type { Project } from "../src/vikunja.ts";
 import { FakeVikunja } from "./fakes.ts";
@@ -146,5 +147,33 @@ describe("!cost week", () => {
     assert.match(out, /- Sun 11 Oct: \$0\.0100 \(this room \$0\.0100\)/);
     assert.match(out, /- Sat 10 Oct: \$0\.0200\n/);
     assert.match(out, /50% of prompt tokens came from the cache\.$/);
+  });
+});
+
+describe("calendar days and long lists", () => {
+  it("!week reaches the 7th day across the October clock change", async () => {
+    const { v, deps } = setup();
+    v.add({ title: "Seventh day", due_date: "2026-10-26T09:00:00Z" });
+    const late = { ...deps, now: () => new Date("2026-10-19T22:30:00Z") }; // Tue 20 Oct 00:30 CEST
+    assert.match((await runCommand(late, "!a", "!week"))!, /Seventh day \(#1\) · Mon 26 Oct/);
+  });
+
+  it("!cost week lists 7 different days across the March clock change", async () => {
+    const { store, deps } = setup();
+    store.logCall({ thread: "t", room: "!a", model: "m", promptTokens: 1, completionTokens: 1, cost: 0.05, request: {}, response: {} }, new Date("2027-03-28T10:00:00Z"));
+    const late = { ...deps, now: () => new Date("2027-03-28T22:30:00Z") }; // Mon 29 Mar 00:30 CEST
+    const out = (await runCommand(late, "!a", "!cost week"))!;
+    assert.match(out, /- Sun 28 Mar: \$0\.0500/);
+    const days = out.split("\n").filter((l) => l.startsWith("- ")).map((l) => l.slice(2, 12));
+    assert.equal(new Set(days).size, 7);
+  });
+
+  it("says when a task list may be incomplete", async () => {
+    const { v, deps } = setup();
+    for (let i = 0; i < 120; i++) v.add({ title: `T${i}` });
+    assert.equal((await openTasks(v)).complete, true);
+    const few = await openTasks(v, undefined, 2);
+    assert.deepEqual([few.tasks.length, few.complete], [100, false]);
+    assert.doesNotMatch((await runCommand(deps, "!a", "!open"))!, /may miss some/);
   });
 });

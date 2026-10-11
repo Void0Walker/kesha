@@ -72,10 +72,12 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
   from Vikunja, private tasks left out, overdue first.
 - **Undo:** the write tools record each change (fields before and after) per request. `!undo` reverts the room's
   latest request as a whole, then the one before. It checks everything first and refuses if a task changed in
-  Vikunja since or became private; created tasks are closed (Kesha can't delete). The log holds real task text and
+  Vikunja since or became private; created tasks are closed (Kesha can't delete). Each change is marked undone right
+  after its write, so an undo that Vikunja broke off continues with the next `!undo`. The conversation gets a note
+  about the undo and a fresh snapshot with the next message. The log holds real task text and
   is pruned after 7 days.
 - **Room snapshot:** in a room with a project, the first message of a conversation carries the project's open tasks
-  (up to 30, pseudonymized, private ones left out), and again after a change or 30 minutes. It's stored in the
+  (the 30 due soonest, pseudonymized, private ones left out), and again after a change or 30 minutes. It's stored in the
   history like the message, so the cached prefix stays stable.
 - **Notifications:** reminders and warnings go to the room set with `!notify-here`, release notes to the one set with
   `!releases-here`, otherwise to the room the user last wrote in.

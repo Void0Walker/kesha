@@ -27,3 +27,9 @@ export function activeConversations(store: Store): Set<string> {
   const rows = store.db.prepare("SELECT key, value FROM state WHERE key LIKE 'conv:%'").all() as { key: string; value: string }[];
   return new Set(rows.map((r) => conversationKey(r.key.slice("conv:".length), (JSON.parse(r.value) as ConversationState).epoch)));
 }
+
+/** The room's current conversation, without counting this as a message. Undefined before the first message. */
+export function peekConversation(store: Store, room: string): string | undefined {
+  const raw = store.getState(stateKey(room));
+  return raw ? conversationKey(room, (JSON.parse(raw) as ConversationState).epoch) : undefined;
+}

@@ -64,7 +64,8 @@ const agent = new Agent({
       }
     : {}),
   tools: createTools(vikunja, config.VIKUNJA_INBOX_PROJECT_ID, (term) => anonymizer.variants(term)),
-  listOpenTasks: (projectId) => openTasks(vikunja, projectId),
+  // Two pages are plenty for the 30 tasks shown, and keep the snapshot to at most two requests
+  listOpenTasks: async (projectId) => (await openTasks(vikunja, projectId, 2)).tasks,
   anonymizer,
   store,
   limits: {

@@ -1,6 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
+/** "2026-10-25" plus n calendar days. Date strings, not 24-hour steps: those skip or repeat a day around DST changes. */
+export function addDays(day: string, n: number): string {
+  const d = new Date(`${day}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
 export interface ChangeRow {
   room: string;
   turnId: string;
@@ -152,6 +159,7 @@ export class Store {
     this.db.prepare("DELETE FROM mappings WHERE thread = ?").run(thread);
     this.db.prepare("DELETE FROM threads WHERE thread = ?").run(thread);
     this.deleteState(`snapshot:${thread}`);
+    this.deleteState(`note:${thread}`);
   }
 
   recordChange(c: ChangeRow, now = Date.now()): void {
@@ -183,7 +191,8 @@ export class Store {
 
   /** Spend per local day over the last `days` days, for one room and in total, plus the share of cached prompt tokens. */
   costReport(room: string, days: number, now = new Date()): { days: { day: string; total: number; room: number }[]; cachedShare: number } {
-    const list = Array.from({ length: days }, (_, i) => this.today(new Date(now.getTime() - i * 86_400_000)));
+    const today = this.today(now);
+    const list = Array.from({ length: days }, (_, i) => addDays(today, -i));
     const rows = this.db.prepare(
       `SELECT day, SUM(cost) AS total, SUM(CASE WHEN room = ? THEN cost ELSE 0 END) AS room,
               SUM(prompt_tokens) AS prompt, SUM(COALESCE(cached_tokens, 0)) AS cached

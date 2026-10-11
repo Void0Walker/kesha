@@ -147,14 +147,33 @@ const SNAPSHOT_TASKS = 30;
 const SNAPSHOT_TITLE = 60;
 const SNAPSHOT_MAX_AGE_MS = 30 * 60_000;
 
+/** Due soonest first, undated last: the 30 shown are the ones that matter now. */
 export function snapshotText(tasks: Task[], at: string, timeZone: string): string {
-  const items = tasks.slice(0, SNAPSHOT_TASKS).map((t) => {
+  const key = (t: Task) => dueOf(t) ?? "9999";
+  const sorted = [...tasks].sort((a, b) => key(a).localeCompare(key(b)) || a.id - b.id);
+  const items = sorted.slice(0, SNAPSHOT_TASKS).map((t) => {
     const due = dueOf(t);
     const title = t.title.length > SNAPSHOT_TITLE ? `${t.title.slice(0, SNAPSHOT_TITLE - 1)}…` : t.title;
     return `#${t.id} ${title}${due ? ` · due ${new Date(due).toLocaleDateString("sv-SE", { timeZone })}` : ""}`;
   });
   const more = tasks.length > SNAPSHOT_TASKS ? `; and ${tasks.length - SNAPSHOT_TASKS} more` : "";
   return `(Context from Kesha, not from the user: open tasks of this room's project as of ${at}: ${items.length ? items.join("; ") : "none"}${more})`;
+}
+
+const snapshotKey = (conversation: string) => `snapshot:${conversation}`;
+const noteKey = (conversation: string) => `note:${conversation}`;
+
+/** The conversation's snapshot no longer matches Vikunja: the next message gets a fresh one. */
+export function markSnapshotStale(store: Store, conversation: string): void {
+  const prev = store.getState(snapshotKey(conversation));
+  if (prev) store.setState(snapshotKey(conversation), JSON.stringify({ ...JSON.parse(prev), stale: true }));
+}
+
+/** Something the model should know with the next message (e.g. that !undo reverted changes). Real text: it is
+ * pseudonymized when the next message is built. */
+export function addConversationNote(store: Store, conversation: string, text: string): void {
+  const prev = store.getState(noteKey(conversation));
+  store.setState(noteKey(conversation), prev ? `${prev}\n${text}` : text);
 }
 
 export class Agent {
@@ -179,28 +198,20 @@ export class Agent {
     return this.#d.now?.() ?? new Date();
   }
 
-  async #snapshot(thread: string, project: RoomProject | undefined, now: Date, stamp: string): Promise<string | undefined> {
+  // Saving that the snapshot is fresh is left to the end of the turn: a failed turn doesn't store the message carrying it
+  async #snapshot(thread: string, project: RoomProject | undefined, stamp: string): Promise<string | undefined> {
     const { store, listOpenTasks, timeZone } = this.#d;
     if (!project || !listOpenTasks) return undefined;
-    const key = `snapshot:${thread}`;
-    const prev = store.getState(key);
+    const prev = store.getState(snapshotKey(thread));
     const state = prev ? (JSON.parse(prev) as { at: number; stale?: boolean }) : undefined;
-    if (state && !state.stale && now.getTime() - state.at < SNAPSHOT_MAX_AGE_MS) return undefined;
+    if (state && !state.stale && this.#now().getTime() - state.at < SNAPSHOT_MAX_AGE_MS) return undefined;
     try {
-      const text = snapshotText(await listOpenTasks(project.id), stamp, timeZone);
-      store.setState(key, JSON.stringify({ at: now.getTime() }));
-      return text;
+      return snapshotText(await listOpenTasks(project.id), stamp, timeZone);
     } catch (e) {
       // Not fatal: a dead token shows up in the next tool call and is reported there
       console.warn("room snapshot skipped:", e);
       return undefined;
     }
-  }
-
-  #markSnapshotStale(thread: string): void {
-    const key = `snapshot:${thread}`;
-    const prev = this.#d.store.getState(key);
-    if (prev) this.#d.store.setState(key, JSON.stringify({ ...JSON.parse(prev), stale: true }));
   }
 
   async turn(thread: string, room: string, userText: string, mode: Mode = "task", project?: RoomProject): Promise<TurnResult> {
@@ -227,7 +238,9 @@ export class Agent {
     // The time goes on after pseudonymizing: it holds no PII, and the phone/card patterns must not see it
     const stamp = sentAt(now, timeZone);
     let content = `[${stamp}] ${anonymizer.anonymize(thread, userText).text}`;
-    const snapshot = await this.#snapshot(thread, project, now, stamp);
+    const note = store.getState(noteKey(thread));
+    if (note) content += `\n\n${anonymizer.anonymize(thread, `(Context from Kesha, not from the user: ${note})`).text}`;
+    const snapshot = await this.#snapshot(thread, project, stamp);
     if (snapshot) content += `\n\n${anonymizer.anonymize(thread, snapshot).text}`;
     history.push({ role: "user", content });
     const promptProject = project && { id: project.id, title: anonymizer.anonymize(thread, project.title).text };
@@ -251,7 +264,8 @@ export class Agent {
       reply, cost, searches, ...(cost > 0 ? { footer: costFooter(cost, searches, spent + cost, limits.dailyCap) } : {}), ...extra,
     });
     let reply: string | undefined;
-    for (let step = 0; step < run.maxSteps; step++) {
+    let tokenDead = false;
+    steps: for (let step = 0; step < run.maxSteps; step++) {
       if (cost >= run.maxCostPerRequest) {
         reply = `I stopped: this request reached the cost limit of ${credits(run.maxCostPerRequest)} before I was done.`;
         break;
@@ -300,7 +314,11 @@ export class Agent {
           result = (await runTool(tools, call.function.name, args, ctx)).result;
         } catch (e) {
           if (e instanceof VikunjaAuthError) {
-            return finish("Vikunja rejected my token: it expired or was revoked. Rotate it (README, \"Rotating the Kesha Vikunja token\"). Nothing was changed.", { tokenDead: true });
+            // Earlier calls of this request may already have written: say so instead of "nothing changed"
+            reply = "Vikunja rejected my token: it expired or was revoked. Rotate it (README, \"Rotating the Kesha Vikunja token\"). " +
+              (changed ? "Changes I made earlier in this request were saved, check them in Vikunja." : "Nothing was changed.");
+            tokenDead = true;
+            break steps;
           }
           if (e instanceof SyntaxError) result = { error: "arguments are not valid JSON" };
           else if (e instanceof UnknownPlaceholderError || e instanceof ProviderRedactionError) result = { error: e.message };
@@ -313,11 +331,14 @@ export class Agent {
     if (reply === undefined) reply = `I stopped after ${run.maxSteps} steps without finishing. Try a narrower request.`;
     if (history.at(-1)?.role !== "assistant") history.push({ role: "assistant", content: anonymizer.anonymize(thread, reply).text });
     store.saveHistory(thread, room, trimHistory(compactHistory(history)), this.#now().getTime());
-    if (changed) this.#markSnapshotStale(thread);
+    // Only now is the message carrying the snapshot and the note stored
+    if (snapshot) store.setState(snapshotKey(thread), JSON.stringify({ at: now.getTime() }));
+    if (note) store.deleteState(noteKey(thread));
+    if (changed) markSnapshotStale(store, thread);
 
     const alert = cost >= limits.alertCost
       ? `This request cost ${credits(cost)}, above the alert threshold of ${credits(limits.alertCost)}.`
       : undefined;
-    return finish(reply + sourceList(sources), alert ? { alert } : {});
+    return finish(reply + sourceList(sources), { ...(alert ? { alert } : {}), ...(tokenDead ? { tokenDead } : {}) });
   }
 }

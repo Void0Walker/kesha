@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { Agent, compactHistory, costFooter, sentAt, trimHistory, type Limits, type ResearchProfile } from "../src/agent.ts";
+import { Agent, compactHistory, costFooter, sentAt, snapshotText, trimHistory, type Limits, type ResearchProfile } from "../src/agent.ts";
 import type { Message } from "../src/llm.ts";
 import { Anonymizer, parseDictionary } from "../src/anonymizer.ts";
 import { Store } from "../src/store.ts";
 import { createTools, openTasks } from "../src/tools.ts";
 import { undoLast } from "../src/undo.ts";
+import { runCommand } from "../src/commands.ts";
+import { currentConversation } from "../src/conversation.ts";
 import { VikunjaAuthError } from "../src/vikunja.ts";
 import { FakeVikunja, say, ScriptedModel, toolCall } from "./fakes.ts";
 
@@ -18,7 +20,7 @@ const RESEARCH: ResearchProfile = { modelName: "test/research", maxSteps: 4, max
 function setup(model: ScriptedModel, limits: Partial<Limits> = {}, research?: ResearchProfile) {
   const store = new Store(":memory:", "Europe/Berlin");
   const v = new FakeVikunja();
-  const listOpenTasks = (projectId: number) => openTasks(v, projectId);
+  const listOpenTasks = async (projectId: number) => (await openTasks(v, projectId, 2)).tasks;
   const anonymizer = new Anonymizer(parseDictionary(DICT), store);
   const agent = new Agent({
     model, modelName: "test/model", tools: createTools(v, 1, (t) => anonymizer.variants(t)), anonymizer, listOpenTasks,
@@ -361,15 +363,15 @@ describe("!undo", () => {
     await agent.turn("c1", "!room", "rename and add");
     await agent.turn("c1", "!room", "done");
 
-    assert.match(await undoLast(store, v, "!room"), /restored "Fix seal now" \(#1\): done/);
+    assert.match((await undoLast(store, v, "!room")).message, /restored "Fix seal now" \(#1\): done/);
     assert.equal(v.tasks.get(1)!.done, false);
-    const second = await undoLast(store, v, "!room");
+    const second = (await undoLast(store, v, "!room")).message;
     assert.match(second, /closed "Buy seal" \(#2\), which I had created\. Closed, not deleted/);
     assert.match(second, /restored "Fix seal" \(#1\): title, due date/);
     assert.deepEqual([v.tasks.get(1)!.title, v.tasks.get(1)!.due_date], ["Fix seal", "2026-10-12T08:00:00.000Z"]);
     assert.equal(v.tasks.get(2)!.done, true);
-    assert.equal(await undoLast(store, v, "!room"), "Nothing to undo in this room.");
-    assert.equal(await undoLast(store, v, "!other"), "Nothing to undo in this room.");
+    assert.equal((await undoLast(store, v, "!room")).message, "Nothing to undo in this room.");
+    assert.equal((await undoLast(store, v, "!other")).message, "Nothing to undo in this room.");
   });
 
   it("refuses when the task was changed since, or is private now, and changes nothing", async () => {
@@ -378,11 +380,11 @@ describe("!undo", () => {
     v.add({ title: "Fix seal" });
     await agent.turn("c1", "!room", "make it urgent");
     v.tasks.get(1)!.title = "Fix seal (edited by hand)";
-    assert.match(await undoLast(store, v, "!room"), /#1 was changed since \(title\)/);
+    assert.match((await undoLast(store, v, "!room")).message, /#1 was changed since \(title\)/);
     assert.equal(v.tasks.get(1)!.priority, 3);
     v.tasks.get(1)!.title = "Fix seal";
     v.tasks.get(1)!.labels = [{ id: 9, title: "private" }];
-    assert.match(await undoLast(store, v, "!room"), /#1 is private now/);
+    assert.match((await undoLast(store, v, "!room")).message, /#1 is private now/);
     assert.equal(v.tasks.get(1)!.priority, 3);
   });
 });
@@ -414,5 +416,94 @@ describe("room snapshot", () => {
     await agent.turn("c1", "!room", "add order filter", "task", ROOM);
     await agent.turn("c1", "!room", "and now?", "task", ROOM);
     assert.match(String(model.requests[2]!.messages.at(-1)!.content), /#1 Fix seal; #2 Order filter\)$/);
+  });
+});
+
+describe("0.8.1 fixes", () => {
+  const ROOM = { id: 2, title: "Home appliances" };
+
+  it("continues an !undo that Vikunja broke off halfway", async () => {
+    const model = new ScriptedModel([toolCall("update_task", { id: 1, priority: 3 }, "a"), toolCall("update_task", { id: 2, priority: 4 }, "b"), say("ok")]);
+    const { store, v, agent } = setup(model);
+    v.add({ title: "One" });
+    v.add({ title: "Two" });
+    await agent.turn("c", "!room", "prioritize");
+    const update = v.updateTask.bind(v);
+    let calls = 0;
+    v.updateTask = async (id, changes) => {
+      if (++calls === 2) throw new Error("Vikunja 502");
+      return update(id, changes);
+    };
+    const first = await undoLast(store, v, "!room");
+    assert.match(first.message, /Undone so far:\n- restored "Two" \(#2\): priority\nVikunja failed while undoing #1\. Send !undo again/);
+    assert.equal(first.reverted, true);
+    v.updateTask = update;
+    assert.match((await undoLast(store, v, "!room")).message, /^Undone:\n- restored "One" \(#1\): priority$/);
+    assert.deepEqual([v.tasks.get(1)!.priority, v.tasks.get(2)!.priority], [0, 0]);
+  });
+
+  it("says when a task was created already done instead of claiming to close it", async () => {
+    const model = new ScriptedModel([toolCall("create_task", { title: "Paid rent", done: true }), say("Logged.")]);
+    const { store, v, agent } = setup(model);
+    await agent.turn("c", "!room", "log that I paid rent");
+    const r = await undoLast(store, v, "!room");
+    assert.match(r.message, /"Paid rent" \(#1\) was created already done, and I can't delete tasks/);
+    assert.equal(r.reverted, false);
+  });
+
+  it("tells about earlier writes when the token dies mid-request, and keeps history and snapshot right", async () => {
+    const model = new ScriptedModel([toolCall("create_task", { title: "Order filter" }), toolCall("list_tasks", {}), say("never")]);
+    const { store, v, agent } = setup(model);
+    v.add({ title: "Fix seal", project_id: 2 });
+    const listTasks = v.listTasks.bind(v);
+    let lists = 0;
+    // The snapshot's list works, the model's list_tasks call meets a dead token
+    v.listTasks = async (q) => {
+      if (++lists > 1) throw new VikunjaAuthError();
+      return listTasks(q);
+    };
+    const res = await agent.turn("c", "!room", "add order filter and show all", "task", ROOM);
+    assert.ok(res.tokenDead);
+    assert.match(res.reply, /Changes I made earlier in this request were saved/);
+    assert.match(JSON.stringify(store.getHistory("c")), /add order filter/);
+    assert.match(store.getState("snapshot:c") ?? "", /"stale":true/);
+  });
+
+  it("after !undo the next message carries a note and a fresh snapshot", async () => {
+    const model = new ScriptedModel([toolCall("update_task", { id: 1, title: "Fix seal by Friday" }), say("Renamed (#1)."), say("ok")]);
+    const { store, v, agent } = setup(model);
+    v.add({ title: "Fix seal", project_id: 2 });
+    const key = currentConversation(store, "!room", NOW.getTime(), 3 * 3_600_000);
+    await agent.turn(key, "!room", "rename it", "task", ROOM);
+    const deps = {
+      store, vikunja: v, timeZone: "Europe/Berlin", now: () => NOW, spentToday: () => 0, dailyCap: 1, version: "1", changelog: "",
+      idleHours: 3, newConversation: () => {},
+    };
+    assert.match((await runCommand(deps, "!room", "!undo"))!, /restored "Fix seal" \(#1\): title/);
+    await agent.turn(key, "!room", "what's the task called?", "task", ROOM);
+    const sent = String(model.requests[2]!.messages.at(-1)!.content);
+    assert.match(sent, /Context from Kesha, not from the user: the user sent !undo, which reverted my last changes\./);
+    assert.match(sent, /open tasks of this room's project as of .*: #1 Fix seal\)$/);
+    assert.equal(store.getState(`note:${key}`), undefined);
+  });
+
+  it("still gives the snapshot after a request that failed", async () => {
+    const model = new ScriptedModel([
+      () => {
+        throw new Error("provider down");
+      },
+      say("ok"),
+    ]);
+    const { v, agent } = setup(model);
+    v.add({ title: "Fix seal", project_id: 2 });
+    await assert.rejects(agent.turn("c", "!room", "hi", "task", ROOM), /provider down/);
+    await agent.turn("c", "!room", "hi again", "task", ROOM);
+    assert.match(String(model.requests[1]!.messages.at(-1)!.content), /open tasks of this room's project as of .*: #1 Fix seal\)$/);
+  });
+
+  it("orders the snapshot by due date, undated last", () => {
+    const task = (id: number, due?: string) => ({ id, title: `T${id}`, description: "", done: false, priority: 0, project_id: 2, labels: null, due_date: due ?? "0001-01-01T00:00:00Z" });
+    const text = snapshotText([task(1), task(2, "2026-10-20T10:00:00Z"), task(3, "2026-10-12T10:00:00Z")], "now", "Europe/Berlin");
+    assert.match(text, /: #3 T3 · due 2026-10-12; #2 T2 · due 2026-10-20; #1 T1\)$/);
   });
 });

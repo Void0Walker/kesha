@@ -2,6 +2,14 @@
 
 Kesha posts the section of a new version to the chat once it runs. Keep entries short and written for the user.
 
+## 0.8.1
+
+- `!undo` can be continued if Vikunja fails halfway: send it again. After an undo I know the change was taken back.
+- A task created already done can't be undone by closing it; I now say so instead of claiming I closed it.
+- If my Vikunja token dies in the middle of a request, I tell you about changes I had already made instead of "nothing was changed".
+- `!week` and `!cost week` count calendar days correctly around clock changes. Long task lists say when they may be incomplete.
+- The tasks I know in a project room are the ones due soonest.
+
 ## 0.8.0
 
 - `!today`, `!week` and `!open` list what's due today, this week, or everything open, for this room's project (or all projects). Instant and free, no model involved.

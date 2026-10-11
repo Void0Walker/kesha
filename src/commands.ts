@@ -1,5 +1,7 @@
+import { addConversationNote, markSnapshotStale } from "./agent.ts";
+import { peekConversation } from "./conversation.ts";
 import { markAnnounced, releaseText } from "./release.ts";
-import type { Store } from "./store.ts";
+import { addDays, type Store } from "./store.ts";
 import { dueOf, openTasks } from "./tools.ts";
 import { undoLast } from "./undo.ts";
 import type { Project, Task, VikunjaApi } from "./vikunja.ts";
@@ -79,7 +81,7 @@ export async function runCommand(d: CommandDeps, room: string, body: string): Pr
     case "open":
       return taskList(d, room, name);
     case "undo":
-      return undoLast(d.store, d.vikunja, room);
+      return undo(d, room);
     case "notify-here":
       d.store.setState("notify-room:alerts", room);
       return "Reminders and warnings (Vikunja token rotation, Vikunja unreachable) go to this room from now on.";
@@ -122,7 +124,6 @@ async function projectCommand(d: CommandDeps, room: string, arg: string): Promis
 }
 
 const LIST_LIMIT = 50;
-const DAY_MS = 86_400_000;
 // "2026-10-18" → "Sat 18 Oct"
 const dayLabel = (day: string) =>
   new Date(`${day}T12:00:00Z`).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
@@ -131,12 +132,14 @@ async function taskList(d: CommandDeps, room: string, which: "today" | "week" | 
   const project = roomProject(d.store, room);
   const now = d.now();
   const today = d.store.today(now);
-  const until = which === "today" ? today : which === "week" ? d.store.today(new Date(now.getTime() + 6 * DAY_MS)) : undefined;
+  const until = which === "today" ? today : which === "week" ? addDays(today, 6) : undefined;
   const localDay = (t: Task) => {
     const due = dueOf(t);
     return due ? new Date(due).toLocaleDateString("sv-SE", { timeZone: d.timeZone }) : undefined;
   };
-  const picked = (await openTasks(d.vikunja, project?.id))
+  const open = await openTasks(d.vikunja, project?.id);
+  const incomplete = open.complete ? "" : "\n(There are more open tasks than I can fetch at once; this list may miss some.)";
+  const picked = open.tasks
     .map((t) => ({ t, day: localDay(t) }))
     .filter((x) => !until || (x.day !== undefined && x.day <= until))
     // Overdue first, then by date, undated last
@@ -144,7 +147,7 @@ async function taskList(d: CommandDeps, room: string, which: "today" | "week" | 
 
   const scope = project ? `in ${project.title}` : "in all projects";
   const what = which === "today" ? "due today or overdue" : which === "week" ? "due this week or overdue" : "open";
-  if (!picked.length) return `Nothing ${what} ${scope}.`;
+  if (!picked.length) return `Nothing ${what} ${scope}.${incomplete}`;
   const names = project ? undefined : new Map((await d.vikunja.listProjects()).map((p): [number, string] => [p.id, p.title]));
   const lines = picked.slice(0, LIST_LIMIT).map(({ t, day }) => {
     const due = day ? ` · ${day < today ? "**overdue** " : ""}${dayLabel(day)}` : "";
@@ -152,7 +155,7 @@ async function taskList(d: CommandDeps, room: string, which: "today" | "week" | 
   });
   const more = picked.length > LIST_LIMIT ? `\n…and ${picked.length - LIST_LIMIT} more` : "";
   const label = which === "today" ? "Due today or overdue" : which === "week" ? "Due this week or overdue" : "Open tasks";
-  return `${label} ${scope}:\n${lines.join("\n")}${more}`;
+  return `${label} ${scope}:\n${lines.join("\n")}${more}${incomplete}`;
 }
 
 function costWeek(d: CommandDeps, room: string): string {
@@ -165,4 +168,15 @@ function costWeek(d: CommandDeps, room: string): string {
     ...lines,
     `${Math.round(r.cachedShare * 100)}% of prompt tokens came from the cache.`,
   ].join("\n");
+}
+
+/** !undo, and telling the room's conversation about it: otherwise the model goes on from the undone state. */
+async function undo(d: CommandDeps, room: string): Promise<string> {
+  const r = await undoLast(d.store, d.vikunja, room);
+  const conversation = peekConversation(d.store, room);
+  if (r.reverted && conversation) {
+    markSnapshotStale(d.store, conversation);
+    addConversationNote(d.store, conversation, `the user sent !undo, which reverted my last changes. ${r.message.replace(/\n/g, " ")}`);
+  }
+  return r.message;
 }

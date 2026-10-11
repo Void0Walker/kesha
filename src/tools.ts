@@ -99,15 +99,25 @@ export interface Tool<S extends z.ZodType = z.ZodType> {
   run(args: z.infer<S>, ctx: ToolContext): Promise<unknown>;
 }
 
+export interface OpenTasks {
+  tasks: Task[];
+  // False when maxPages ran out before the last page: there are more open tasks than listed
+  complete: boolean;
+}
+
 /** Open tasks, private ones left out, across pages (Vikunja returns at most 50 per page). */
-export async function openTasks(vikunja: VikunjaApi, projectId?: number, maxPages = 10): Promise<Task[]> {
+export async function openTasks(vikunja: VikunjaApi, projectId?: number, maxPages = 100): Promise<OpenTasks> {
   const all: Task[] = [];
+  let complete = false;
   for (let page = 1; page <= maxPages; page++) {
     const batch = await vikunja.listTasks({ ...(projectId !== undefined ? { projectId } : {}), page, perPage: 50 });
     all.push(...batch);
-    if (batch.length < 50) break;
+    if (batch.length < 50) {
+      complete = true;
+      break;
+    }
   }
-  return all.filter((t) => !t.done && !isPrivate(t));
+  return { tasks: all.filter((t) => !t.done && !isPrivate(t)), complete };
 }
 
 const tool = <S extends z.ZodType>(t: Tool<S>): Tool => t as unknown as Tool;
