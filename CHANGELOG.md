@@ -2,6 +2,13 @@
 
 Kesha posts the section of a new version to the chat once it runs. Keep entries short and written for the user.
 
+## 0.8.0
+
+- `!today`, `!week` and `!open` list what's due today, this week, or everything open, for this room's project (or all projects). Instant and free, no model involved.
+- `!undo` takes back my last change in this room: everything that one message changed. Again for the one before. I won't undo if you edited the task in Vikunja since. Tasks I created get closed, not deleted.
+- `!cost week` shows the last 7 days, this room's share, and how much came from the cache.
+- In a room with a project I already know its open tasks when you write, so most questions need fewer steps.
+
 ## 0.7.0
 
 - Each room is now one ongoing conversation: just write, no need to reply inside threads. After 3 hours of silence I start fresh, or right away with `!new`.

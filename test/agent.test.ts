@@ -4,7 +4,8 @@ import { Agent, compactHistory, costFooter, sentAt, trimHistory, type Limits, ty
 import type { Message } from "../src/llm.ts";
 import { Anonymizer, parseDictionary } from "../src/anonymizer.ts";
 import { Store } from "../src/store.ts";
-import { createTools } from "../src/tools.ts";
+import { createTools, openTasks } from "../src/tools.ts";
+import { undoLast } from "../src/undo.ts";
 import { VikunjaAuthError } from "../src/vikunja.ts";
 import { FakeVikunja, say, ScriptedModel, toolCall } from "./fakes.ts";
 
@@ -17,9 +18,10 @@ const RESEARCH: ResearchProfile = { modelName: "test/research", maxSteps: 4, max
 function setup(model: ScriptedModel, limits: Partial<Limits> = {}, research?: ResearchProfile) {
   const store = new Store(":memory:", "Europe/Berlin");
   const v = new FakeVikunja();
+  const listOpenTasks = (projectId: number) => openTasks(v, projectId);
   const anonymizer = new Anonymizer(parseDictionary(DICT), store);
   const agent = new Agent({
-    model, modelName: "test/model", tools: createTools(v, 1, (t) => anonymizer.variants(t)), anonymizer,
+    model, modelName: "test/model", tools: createTools(v, 1, (t) => anonymizer.variants(t)), anonymizer, listOpenTasks,
     store, limits: { ...LIMITS, ...limits }, timeZone: "Europe/Berlin", now: () => NOW, ...(research ? { research } : {}),
   });
   return { store, v, agent };
@@ -342,5 +344,75 @@ describe("token savings", () => {
   it("stamps user messages with weekday, local time and offset", () => {
     assert.equal(sentAt(new Date("2026-12-24T17:30:00Z"), "Europe/Berlin"), "Thu 2026-12-24 18:30 +01:00");
     assert.equal(sentAt(new Date("2026-10-06T10:00:00Z"), "UTC"), "Tue 2026-10-06 10:00 +00:00");
+  });
+});
+
+describe("!undo", () => {
+  it("reverts a whole request, then the one before, and closes tasks it created", async () => {
+    const model = new ScriptedModel([
+      toolCall("update_task", { id: 1, title: "Fix seal now", due_date: "2026-10-20T10:00:00+02:00" }, "a"),
+      toolCall("create_task", { title: "Buy seal" }, "b"),
+      say("Done."),
+      toolCall("update_task", { id: 1, done: true }, "c"),
+      say("Marked done."),
+    ]);
+    const { store, v, agent } = setup(model);
+    v.add({ title: "Fix seal", due_date: "2026-10-12T08:00:00.000Z" });
+    await agent.turn("c1", "!room", "rename and add");
+    await agent.turn("c1", "!room", "done");
+
+    assert.match(await undoLast(store, v, "!room"), /restored "Fix seal now" \(#1\): done/);
+    assert.equal(v.tasks.get(1)!.done, false);
+    const second = await undoLast(store, v, "!room");
+    assert.match(second, /closed "Buy seal" \(#2\), which I had created\. Closed, not deleted/);
+    assert.match(second, /restored "Fix seal" \(#1\): title, due date/);
+    assert.deepEqual([v.tasks.get(1)!.title, v.tasks.get(1)!.due_date], ["Fix seal", "2026-10-12T08:00:00.000Z"]);
+    assert.equal(v.tasks.get(2)!.done, true);
+    assert.equal(await undoLast(store, v, "!room"), "Nothing to undo in this room.");
+    assert.equal(await undoLast(store, v, "!other"), "Nothing to undo in this room.");
+  });
+
+  it("refuses when the task was changed since, or is private now, and changes nothing", async () => {
+    const model = new ScriptedModel([toolCall("update_task", { id: 1, priority: 3 }), say("ok")]);
+    const { store, v, agent } = setup(model);
+    v.add({ title: "Fix seal" });
+    await agent.turn("c1", "!room", "make it urgent");
+    v.tasks.get(1)!.title = "Fix seal (edited by hand)";
+    assert.match(await undoLast(store, v, "!room"), /#1 was changed since \(title\)/);
+    assert.equal(v.tasks.get(1)!.priority, 3);
+    v.tasks.get(1)!.title = "Fix seal";
+    v.tasks.get(1)!.labels = [{ id: 9, title: "private" }];
+    assert.match(await undoLast(store, v, "!room"), /#1 is private now/);
+    assert.equal(v.tasks.get(1)!.priority, 3);
+  });
+});
+
+describe("room snapshot", () => {
+  const ROOM = { id: 2, title: "Home appliances" };
+
+  it("gives the project's open tasks with the first message, pseudonymized, without private tasks, stored in history", async () => {
+    const model = new ScriptedModel([say("You have one task (#1)."), say("ok")]);
+    const { store, v, agent } = setup(model);
+    v.add({ title: "Call Jana about the boiler", project_id: 2, due_date: "2026-10-12T08:00:00Z" });
+    v.add({ title: "Therapy appointment", project_id: 2, labels: [{ id: 9, title: "private" }] });
+    v.add({ title: "Elsewhere", project_id: 1 });
+    await agent.turn("c1", "!room", "what's open?", "task", ROOM);
+    const first = String(model.requests[0]!.messages.at(-1)!.content);
+    assert.match(first, /what's open\?\n\n\(Context from Kesha, not from the user: open tasks of this room's project as of Tue 2026-10-06 12:00 \+02:00: #1 Call <PERSON_1> about the boiler · due 2026-10-12\)$/);
+    assert.doesNotMatch(model.sent(), /Therapy|Elsewhere|Jana/);
+    assert.match(JSON.stringify(store.getHistory("c1")), /Context from Kesha/);
+
+    // Fresh and unchanged: the next message comes without a new snapshot
+    await agent.turn("c1", "!room", "thanks", "task", ROOM);
+    assert.doesNotMatch(String(model.requests[1]!.messages.at(-1)!.content), /Context from Kesha/);
+  });
+
+  it("refreshes the snapshot after the request changed tasks", async () => {
+    const model = new ScriptedModel([toolCall("create_task", { title: "Order filter" }), say("Added (#2)."), say("ok")]);
+    const { v, agent } = setup(model);
+    v.add({ title: "Fix seal", project_id: 2 });
+    await agent.turn("c1", "!room", "add order filter", "task", ROOM);
+    await agent.turn("c1", "!room", "and now?", "task", ROOM);
+    assert.match(String(model.requests[2]!.messages.at(-1)!.content), /#1 Fix seal; #2 Order filter\)$/);
   });
 });

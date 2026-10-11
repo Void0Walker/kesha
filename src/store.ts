@@ -1,6 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
+export interface ChangeRow {
+  room: string;
+  turnId: string;
+  taskId: number;
+  kind: "create" | "update";
+  before?: Record<string, unknown>;
+  after: Record<string, unknown>;
+}
+
 export interface CallLog {
   thread: string;
   room?: string;
@@ -41,6 +50,11 @@ export class Store {
       CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       -- Research threads until 0.6; research is per message since 0.7
       DROP TABLE IF EXISTS thread_modes;
+      -- Kesha's task changes, for !undo. Real task text: pruned after a few days
+      CREATE TABLE IF NOT EXISTS changes (
+        id INTEGER PRIMARY KEY, room TEXT NOT NULL, turn_id TEXT NOT NULL, ts INTEGER NOT NULL, task_id INTEGER NOT NULL,
+        kind TEXT NOT NULL, before_json TEXT, after_json TEXT NOT NULL, undone_at INTEGER);
+      CREATE INDEX IF NOT EXISTS changes_room ON changes(room, id);
     `);
     // Added in 0.6.0. Nullable, so an older image can still insert rows after a rollback
     const columns = new Set((this.db.prepare("PRAGMA table_info(calls)").all() as { name: string }[]).map((c) => c.name));
@@ -137,6 +151,50 @@ export class Store {
   #forget(thread: string): void {
     this.db.prepare("DELETE FROM mappings WHERE thread = ?").run(thread);
     this.db.prepare("DELETE FROM threads WHERE thread = ?").run(thread);
+    this.deleteState(`snapshot:${thread}`);
+  }
+
+  recordChange(c: ChangeRow, now = Date.now()): void {
+    this.db
+      .prepare("INSERT INTO changes (room, turn_id, ts, task_id, kind, before_json, after_json) VALUES (?,?,?,?,?,?,?)")
+      .run(c.room, c.turnId, now, c.taskId, c.kind, c.before ? JSON.stringify(c.before) : null, JSON.stringify(c.after));
+  }
+
+  /** The changes of the room's latest request that hasn't been undone, newest first. */
+  lastChanges(room: string): (ChangeRow & { id: number })[] {
+    const last = this.db.prepare("SELECT turn_id FROM changes WHERE room = ? AND undone_at IS NULL ORDER BY id DESC LIMIT 1").get(room) as { turn_id: string } | undefined;
+    if (!last) return [];
+    const rows = this.db.prepare("SELECT * FROM changes WHERE room = ? AND turn_id = ? AND undone_at IS NULL ORDER BY id DESC").all(room, last.turn_id) as {
+      id: number; room: string; turn_id: string; task_id: number; kind: "create" | "update"; before_json: string | null; after_json: string;
+    }[];
+    return rows.map((r) => ({
+      id: r.id, room: r.room, turnId: r.turn_id, taskId: r.task_id, kind: r.kind,
+      ...(r.before_json ? { before: JSON.parse(r.before_json) } : {}), after: JSON.parse(r.after_json),
+    }));
+  }
+
+  markUndone(ids: number[], now = Date.now()): void {
+    for (const id of ids) this.db.prepare("UPDATE changes SET undone_at = ? WHERE id = ?").run(now, id);
+  }
+
+  pruneChanges(maxAgeMs: number, now = Date.now()): number {
+    return Number(this.db.prepare("DELETE FROM changes WHERE ts < ?").run(now - maxAgeMs).changes);
+  }
+
+  /** Spend per local day over the last `days` days, for one room and in total, plus the share of cached prompt tokens. */
+  costReport(room: string, days: number, now = new Date()): { days: { day: string; total: number; room: number }[]; cachedShare: number } {
+    const list = Array.from({ length: days }, (_, i) => this.today(new Date(now.getTime() - i * 86_400_000)));
+    const rows = this.db.prepare(
+      `SELECT day, SUM(cost) AS total, SUM(CASE WHEN room = ? THEN cost ELSE 0 END) AS room,
+              SUM(prompt_tokens) AS prompt, SUM(COALESCE(cached_tokens, 0)) AS cached
+       FROM calls WHERE day >= ? GROUP BY day`,
+    ).all(room, list.at(-1)!) as { day: string; total: number; room: number; prompt: number; cached: number }[];
+    const byDay = new Map(rows.map((r) => [r.day, r]));
+    const prompt = rows.reduce((n, r) => n + r.prompt, 0);
+    return {
+      days: list.map((day) => ({ day, total: byDay.get(day)?.total ?? 0, room: byDay.get(day)?.room ?? 0 })),
+      cachedShare: prompt ? rows.reduce((n, r) => n + r.cached, 0) / prompt : 0,
+    };
   }
 
   getState(key: string): string | undefined {

@@ -68,6 +68,15 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
 - **Decisions:** only on request ("note that decision"), Kesha creates an open task titled "Decision: …", with a
   summary (what, why, what was ruled out, date) in the room's project. Conversations themselves
   never go to Vikunja; they stay pseudonymized in Kesha's SQLite and are deleted after 30 idle days.
+- **Shortcuts without the model:** `!today`, `!week`, `!open` list the room's project (or all projects) straight
+  from Vikunja, private tasks left out, overdue first.
+- **Undo:** the write tools record each change (fields before and after) per request. `!undo` reverts the room's
+  latest request as a whole, then the one before. It checks everything first and refuses if a task changed in
+  Vikunja since or became private; created tasks are closed (Kesha can't delete). The log holds real task text and
+  is pruned after 7 days.
+- **Room snapshot:** in a room with a project, the first message of a conversation carries the project's open tasks
+  (up to 30, pseudonymized, private ones left out), and again after a change or 30 minutes. It's stored in the
+  history like the message, so the cached prefix stays stable.
 - **Notifications:** reminders and warnings go to the room set with `!notify-here`, release notes to the one set with
   `!releases-here`, otherwise to the room the user last wrote in.
 
@@ -78,8 +87,8 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
   results leave out default fields. History over 24k characters is cut to ~12k at once, so its start stays cacheable.
   Request bodies in the call log are blanked after 30 days, costs stay.
 
-Commands in a chat, answered without the model and free: `!help`, `!new`, `!project [name|none]`, `!notify-here`,
-`!releases-here`, `!cost`. And `!research <question>` / `!r <question>`, which use the research model.
+Commands in a chat, answered without the model and free: `!help`, `!today`, `!week`, `!open`, `!undo`, `!new`,
+`!project [name|none]`, `!notify-here`, `!releases-here`, `!cost`, `!cost week`. And `!research <question>` / `!r <question>`, which use the research model.
 
 ## Configuration
 

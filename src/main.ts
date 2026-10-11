@@ -10,13 +10,15 @@ import { Bot } from "./matrix.ts";
 import { activeConversations } from "./conversation.ts";
 import { announceRelease } from "./release.ts";
 import { Store } from "./store.ts";
-import { createTools } from "./tools.ts";
+import { createTools, openTasks } from "./tools.ts";
 import { Vikunja, VikunjaAuthError } from "./vikunja.ts";
 
 const IDLE_THREAD_MS = 30 * 86_400_000;
 // Ended conversations (after !new or a quiet period) are never read again: forget them, with their mappings, soon
 const ENDED_CONVERSATION_MS = 3_600_000;
 const CALL_BODIES_MS = 30 * 86_400_000;
+// !undo works on the last week; the change log holds real task text
+const CHANGES_MS = 7 * 86_400_000;
 const HOUSEKEEPING_MS = 3_600_000;
 
 const config = loadConfig();
@@ -62,6 +64,7 @@ const agent = new Agent({
       }
     : {}),
   tools: createTools(vikunja, config.VIKUNJA_INBOX_PROJECT_ID, (term) => anonymizer.variants(term)),
+  listOpenTasks: (projectId) => openTasks(vikunja, projectId),
   anonymizer,
   store,
   limits: {
@@ -82,7 +85,8 @@ const bot = new Bot({
   dataDir: config.KESHA_DATA_DIR,
   agent,
   store,
-  listProjects: () => vikunja.listProjects(),
+  vikunja,
+  timeZone: config.KESHA_TIMEZONE,
   version,
   changelog,
   idleMs: config.KESHA_CONVERSATION_IDLE_HOURS * 3_600_000,
@@ -99,6 +103,7 @@ async function housekeeping() {
   const forgotten = store.forgetIdleThreads(IDLE_THREAD_MS);
   const ended = store.forgetEndedConversations(activeConversations(store), ENDED_CONVERSATION_MS);
   if (forgotten + ended) console.log(`pii: forgot ${forgotten + ended} conversation(s)`);
+  store.pruneChanges(CHANGES_MS);
   const blanked = store.pruneCallBodies(CALL_BODIES_MS);
   if (blanked) console.log(`calls: blanked ${blanked} request bodies older than 30 days`);
   try {

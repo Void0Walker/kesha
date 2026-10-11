@@ -5,7 +5,7 @@ import { notifyRoom, roomProject, runCommand, type NotifyKind } from "./commands
 import { currentConversation } from "./conversation.ts";
 import { replyContent, type FormatOptions, type MatrixText } from "./format.ts";
 import type { Store } from "./store.ts";
-import { VikunjaAuthError, type Project } from "./vikunja.ts";
+import { VikunjaAuthError, type VikunjaApi } from "./vikunja.ts";
 
 // After a fresh start (empty sync store) the first sync replays recent room history. Anything older than this
 // before startup is not answered again; messages sent during a short restart still are
@@ -29,7 +29,8 @@ export interface BotOptions {
   dataDir: string;
   agent: Agent;
   store: Store;
-  listProjects(): Promise<Project[]>;
+  vikunja: VikunjaApi;
+  timeZone: string;
   version: string;
   changelog: string;
   // A room's conversation starts over after this much silence
@@ -133,9 +134,9 @@ export class Bot {
     store.setState("alert-room", roomId);
 
     try {
-      const { listProjects, version, changelog } = this.#o;
+      const { vikunja, timeZone, version, changelog } = this.#o;
       const answer = await runCommand({
-        store, listProjects, version, changelog, idleHours: idleMs / 3_600_000,
+        store, vikunja, timeZone, now: () => new Date(), version, changelog, idleHours: idleMs / 3_600_000,
         spentToday: () => agent.spentToday(), dailyCap: agent.dailyCap,
         newConversation: () => void currentConversation(store, roomId, ev.origin_server_ts, idleMs, true),
       }, roomId, body);

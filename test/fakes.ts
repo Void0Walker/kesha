@@ -27,12 +27,16 @@ export class FakeVikunja implements VikunjaApi {
   }
 
   async listTasks(q: TaskQuery) {
-    return [...this.tasks.values()].filter(
-      (t) =>
-        (q.includeDone || !t.done) &&
-        (q.projectId === undefined || t.project_id === q.projectId) &&
-        (!q.search || `${t.title} ${t.description}`.toLowerCase().includes(q.search.toLowerCase())),
-    );
+    const perPage = q.perPage ?? 50;
+    const page = q.page ?? 1;
+    return [...this.tasks.values()]
+      .filter(
+        (t) =>
+          (q.includeDone || !t.done) &&
+          (q.projectId === undefined || t.project_id === q.projectId) &&
+          (!q.search || `${t.title} ${t.description}`.toLowerCase().includes(q.search.toLowerCase())),
+      )
+      .slice((page - 1) * perPage, page * perPage);
   }
 
   async getTask(id: number) {

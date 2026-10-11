@@ -46,6 +46,8 @@ export function textToHtml(text: string): string {
 }
 
 const dateOrNull = (d: string) => (d === NO_DATE || d.startsWith("0001-") ? null : d);
+/** The task's due date, or null when it has none. */
+export const dueOf = (t: Task) => dateOrNull(t.due_date);
 
 // Default values are left out (not done, priority 0, no due date, no labels): they were ~40% of a task list's tokens.
 // The system prompt tells the model about the defaults
@@ -71,11 +73,41 @@ const DueDate = z
   .describe("ISO 8601 date or date-time with offset");
 const Priority = z.number().int().min(0).max(5).describe("0 unset, 1 low, 2 medium, 3 high, 4 urgent, 5 do now");
 
+// The fields Kesha can change, as Vikunja stores them (HTML description, ISO due date). What !undo restores
+export const EDITABLE = ["title", "description", "done", "due_date", "priority", "project_id"] as const;
+export type TaskFields = Pick<Task, (typeof EDITABLE)[number]>;
+export const editableFields = (t: Task): TaskFields =>
+  Object.fromEntries(EDITABLE.map((f) => [f, t[f]])) as TaskFields;
+
+export interface ChangeRecord {
+  taskId: number;
+  kind: "create" | "update";
+  // Unset for a created task
+  before?: TaskFields;
+  after: TaskFields;
+}
+
+// Per request: lets the write tools record what they changed, for !undo
+export interface ToolContext {
+  recordChange?(c: ChangeRecord): void;
+}
+
 export interface Tool<S extends z.ZodType = z.ZodType> {
   name: string;
   description: string;
   schema: S;
-  run(args: z.infer<S>): Promise<unknown>;
+  run(args: z.infer<S>, ctx: ToolContext): Promise<unknown>;
+}
+
+/** Open tasks, private ones left out, across pages (Vikunja returns at most 50 per page). */
+export async function openTasks(vikunja: VikunjaApi, projectId?: number, maxPages = 10): Promise<Task[]> {
+  const all: Task[] = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const batch = await vikunja.listTasks({ ...(projectId !== undefined ? { projectId } : {}), page, perPage: 50 });
+    all.push(...batch);
+    if (batch.length < 50) break;
+  }
+  return all.filter((t) => !t.done && !isPrivate(t));
 }
 
 const tool = <S extends z.ZodType>(t: Tool<S>): Tool => t as unknown as Tool;
@@ -170,11 +202,12 @@ export function createTools(vikunja: VikunjaApi, inboxProjectId: number, variant
           done: z.boolean().optional().describe("create it already done, e.g. a recorded decision"),
         })
         .strict(),
-      async run(a) {
+      async run(a, ctx) {
         const fields = toChanges(a) as TaskChanges & { title: string };
         const created = await vikunja.createTask(a.project_id ?? inboxProjectId, fields);
         // In case Vikunja ignores done on create
-        if (fields.done && !created.done) await vikunja.updateTask(created.id, { done: true });
+        const final = fields.done && !created.done ? await vikunja.updateTask(created.id, { done: true }) : created;
+        ctx.recordChange?.({ taskId: created.id, kind: "create", after: editableFields(final) });
         return summarize(await verify(created.id, fields), true);
       },
     }),
@@ -193,11 +226,13 @@ export function createTools(vikunja: VikunjaApi, inboxProjectId: number, variant
         })
         .strict()
         .refine((a) => Object.keys(a).length > 1, "give at least one field to change"),
-      async run(a) {
+      async run(a, ctx) {
         const { id, ...rest } = a;
-        await readable(id);
+        const before = await readable(id);
         const changes = toChanges(rest);
-        await vikunja.updateTask(id, changes);
+        const updated = await vikunja.updateTask(id, changes);
+        // Recorded before verify: a write that verify rejects may still have changed something
+        ctx.recordChange?.({ taskId: id, kind: "update", before: editableFields(before), after: editableFields(updated) });
         return summarize(await verify(id, changes), true);
       },
     }),
@@ -205,7 +240,7 @@ export function createTools(vikunja: VikunjaApi, inboxProjectId: number, variant
 }
 
 /** Run a tool call. Every failure becomes a message for the model, except a dead Vikunja token. */
-export async function runTool(tools: Tool[], name: string, rawArgs: unknown): Promise<{ ok: boolean; result: unknown }> {
+export async function runTool(tools: Tool[], name: string, rawArgs: unknown, ctx: ToolContext = {}): Promise<{ ok: boolean; result: unknown }> {
   const t = tools.find((x) => x.name === name);
   if (!t) return { ok: false, result: { error: `unknown tool ${name}` } };
   const parsed = t.schema.safeParse(rawArgs);
@@ -213,7 +248,7 @@ export async function runTool(tools: Tool[], name: string, rawArgs: unknown): Pr
     return { ok: false, result: { error: `invalid arguments: ${parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")}` } };
   }
   try {
-    return { ok: true, result: await t.run(parsed.data) };
+    return { ok: true, result: await t.run(parsed.data, ctx) };
   } catch (e) {
     if (e instanceof ToolError) return { ok: false, result: { error: e.message } };
     if (e instanceof VikunjaError && e.name !== "VikunjaAuthError") return { ok: false, result: { error: e.message } };

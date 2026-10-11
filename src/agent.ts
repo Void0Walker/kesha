@@ -1,9 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { Anonymizer, ProviderRedactionError, rejectProviderRedactions, UnknownPlaceholderError } from "./anonymizer.ts";
 import type { ChatModel, Message, ReasoningEffort } from "./llm.ts";
 import type { RoomProject } from "./commands.ts";
 import type { Store } from "./store.ts";
-import { runTool, toolDefinitions, type Tool } from "./tools.ts";
-import { VikunjaAuthError } from "./vikunja.ts";
+import { dueOf, runTool, toolDefinitions, type Tool, type ToolContext } from "./tools.ts";
+import { VikunjaAuthError, type Task } from "./vikunja.ts";
 
 export interface Limits {
   maxSteps: number;
@@ -34,6 +35,8 @@ export interface AgentDeps {
   // Unset: research is off
   research?: ResearchProfile;
   tools: Tool[];
+  // Open, non-private tasks of a project, for the room snapshot. Unset: no snapshot
+  listOpenTasks?(projectId: number): Promise<Task[]>;
   anonymizer: Anonymizer;
   store: Store;
   limits: Limits;
@@ -138,6 +141,22 @@ export function trimHistory(history: Message[]): Message[] {
 
 const NO_ANSWER = "I got no answer from the model. Please try again.";
 
+// Room snapshot: the project's open tasks, given with the user message so most questions need no list_tasks call.
+// Stored in history like the message itself (keeps the cached prefix stable), refreshed only when stale or changed
+const SNAPSHOT_TASKS = 30;
+const SNAPSHOT_TITLE = 60;
+const SNAPSHOT_MAX_AGE_MS = 30 * 60_000;
+
+export function snapshotText(tasks: Task[], at: string, timeZone: string): string {
+  const items = tasks.slice(0, SNAPSHOT_TASKS).map((t) => {
+    const due = dueOf(t);
+    const title = t.title.length > SNAPSHOT_TITLE ? `${t.title.slice(0, SNAPSHOT_TITLE - 1)}…` : t.title;
+    return `#${t.id} ${title}${due ? ` · due ${new Date(due).toLocaleDateString("sv-SE", { timeZone })}` : ""}`;
+  });
+  const more = tasks.length > SNAPSHOT_TASKS ? `; and ${tasks.length - SNAPSHOT_TASKS} more` : "";
+  return `(Context from Kesha, not from the user: open tasks of this room's project as of ${at}: ${items.length ? items.join("; ") : "none"}${more})`;
+}
+
 export class Agent {
   readonly #d: AgentDeps;
   readonly #toolDefs: ReturnType<typeof toolDefinitions>;
@@ -158,6 +177,30 @@ export class Agent {
 
   #now(): Date {
     return this.#d.now?.() ?? new Date();
+  }
+
+  async #snapshot(thread: string, project: RoomProject | undefined, now: Date, stamp: string): Promise<string | undefined> {
+    const { store, listOpenTasks, timeZone } = this.#d;
+    if (!project || !listOpenTasks) return undefined;
+    const key = `snapshot:${thread}`;
+    const prev = store.getState(key);
+    const state = prev ? (JSON.parse(prev) as { at: number; stale?: boolean }) : undefined;
+    if (state && !state.stale && now.getTime() - state.at < SNAPSHOT_MAX_AGE_MS) return undefined;
+    try {
+      const text = snapshotText(await listOpenTasks(project.id), stamp, timeZone);
+      store.setState(key, JSON.stringify({ at: now.getTime() }));
+      return text;
+    } catch (e) {
+      // Not fatal: a dead token shows up in the next tool call and is reported there
+      console.warn("room snapshot skipped:", e);
+      return undefined;
+    }
+  }
+
+  #markSnapshotStale(thread: string): void {
+    const key = `snapshot:${thread}`;
+    const prev = this.#d.store.getState(key);
+    if (prev) this.#d.store.setState(key, JSON.stringify({ ...JSON.parse(prev), stale: true }));
   }
 
   async turn(thread: string, room: string, userText: string, mode: Mode = "task", project?: RoomProject): Promise<TurnResult> {
@@ -182,11 +225,24 @@ export class Agent {
     // Record the thread before anything is pseudonymized, so the idle cleanup also finds its mappings
     store.saveHistory(thread, room, history, now.getTime());
     // The time goes on after pseudonymizing: it holds no PII, and the phone/card patterns must not see it
-    history.push({ role: "user", content: `[${sentAt(now, timeZone)}] ${anonymizer.anonymize(thread, userText).text}` });
+    const stamp = sentAt(now, timeZone);
+    let content = `[${stamp}] ${anonymizer.anonymize(thread, userText).text}`;
+    const snapshot = await this.#snapshot(thread, project, now, stamp);
+    if (snapshot) content += `\n\n${anonymizer.anonymize(thread, snapshot).text}`;
+    history.push({ role: "user", content });
     const promptProject = project && { id: project.id, title: anonymizer.anonymize(thread, project.title).text };
     // Built once per turn: identical bytes in every call keep the prompt cache warm
     const system: Message = { role: "system", content: systemPrompt(mode, promptProject) };
     const sessionId = store.sessionId(thread);
+    // Everything this request changes is recorded under one id, so !undo reverts the request as a whole
+    const turnId = randomUUID();
+    let changed = false;
+    const ctx: ToolContext = {
+      recordChange: (c) => {
+        changed = true;
+        store.recordChange({ room, turnId, taskId: c.taskId, kind: c.kind, ...(c.before ? { before: c.before } : {}), after: c.after });
+      },
+    };
 
     let cost = 0;
     let searches = 0;
@@ -241,7 +297,7 @@ export class Agent {
           if (project && call.function.name === "create_task" && args && typeof args === "object" && !("project_id" in args)) {
             (args as Record<string, unknown>).project_id = project.id;
           }
-          result = (await runTool(tools, call.function.name, args)).result;
+          result = (await runTool(tools, call.function.name, args, ctx)).result;
         } catch (e) {
           if (e instanceof VikunjaAuthError) {
             return finish("Vikunja rejected my token: it expired or was revoked. Rotate it (README, \"Rotating the Kesha Vikunja token\"). Nothing was changed.", { tokenDead: true });
@@ -257,6 +313,7 @@ export class Agent {
     if (reply === undefined) reply = `I stopped after ${run.maxSteps} steps without finishing. Try a narrower request.`;
     if (history.at(-1)?.role !== "assistant") history.push({ role: "assistant", content: anonymizer.anonymize(thread, reply).text });
     store.saveHistory(thread, room, trimHistory(compactHistory(history)), this.#now().getTime());
+    if (changed) this.#markSnapshotStale(thread);
 
     const alert = cost >= limits.alertCost
       ? `This request cost ${credits(cost)}, above the alert threshold of ${credits(limits.alertCost)}.`
