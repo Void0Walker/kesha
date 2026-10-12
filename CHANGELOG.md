@@ -2,6 +2,12 @@
 
 Kesha posts the section of a new version to the chat once it runs. Keep entries short and written for the user.
 
+## 1.2.0
+
+- I answer in the language you write in, even when your tasks or the pages I read are in another one.
+- `!r` now keeps researching: follow-up questions stay with the research model and web search, until I record a task or a decision for you. Then I'm back to the quick model. `!new` also ends it.
+- Research can open web pages, not only search. I check products and shops before I link them, and tell you what I couldn't verify (Amazon and other big shops often block bots). The cost line shows how many pages I opened.
+
 ## 1.1.0
 
 - Letter rooms: `!mode letters` turns a room into a writing desk for emails and letters to officials, doctors and other important people, in formal Czech unless you ask otherwise. Describe what you need, refine the draft ("more polite", "add the case number"), `!new` before the next letter. Drafts use a stronger model and cost about a cent. `!mode tasks` switches back.

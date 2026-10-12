@@ -46,6 +46,8 @@ const Env = z.object({
   KESHA_RESEARCH_MAX_COST_PER_REQUEST: money(0.25),
   // Web searches per research request, over all its model calls
   KESHA_RESEARCH_MAX_SEARCHES: z.coerce.number().int().positive().default(6),
+  // Web pages the research model may open per model call (Exa, $0.001 each). 0: search only
+  KESHA_RESEARCH_MAX_FETCHES: z.coerce.number().int().nonnegative().default(5),
   KESHA_RESEARCH_REASONING_EFFORT: z.enum(["off", "low", "medium", "high"]).default("medium"),
 
   // Rooms set with !mode letters. Unset model: the task model, with the letter instructions

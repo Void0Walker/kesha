@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { MatrixClient, RustSdkCryptoStorageProvider, SimpleFsStorageProvider } from "matrix-bot-sdk";
 import type { Agent } from "./agent.ts";
 import { notifyRoom, roomMode, roomProject, runCommand, type NotifyKind } from "./commands.ts";
-import { currentConversation } from "./conversation.ts";
+import { currentConversation, inResearch, setResearch } from "./conversation.ts";
 import { replyContent, type FormatOptions, type MatrixText } from "./format.ts";
 import type { Store } from "./store.ts";
 import { VikunjaAuthError, type VikunjaApi } from "./vikunja.ts";
@@ -151,11 +151,11 @@ export class Bot {
       return;
     }
 
-    // !research <question> or !r <question>: this one message goes to the research model, with web search
-    const research = /^!(?:research|r)\b\s*([\s\S]*)$/i.exec(body);
-    const text = research ? research[1]!.trim() : body;
-    if (research && !text) {
-      await reply("Usage: !research <question>, or !r <question>. Only that message uses research; start the next one with !r too if it needs the web.");
+    // !research <question> or !r <question>: the research model with web search, also for the follow-ups
+    const command = /^!(?:research|r)\b\s*([\s\S]*)$/i.exec(body);
+    const text = command ? command[1]!.trim() : body;
+    if (command && !text) {
+      await reply("Usage: !research <question>, or !r <question>. Follow-ups stay with research until I record a task or decision, or until !new.");
       return;
     }
     if (this.#vikunjaDown) {
@@ -164,6 +164,8 @@ export class Bot {
     }
 
     const conversation = currentConversation(store, roomId, ev.origin_server_ts, idleMs);
+    // A conversation started with !r stays in research until a task or decision is recorded, !new or the idle restart
+    const research = command !== null || (agent.researchEnabled && inResearch(store, conversation));
     // A typing notice lasts 30 s; long requests need it renewed
     const typing = () => void this.client.setTyping(roomId, true, 30_000).catch(() => {});
     typing();
@@ -174,6 +176,7 @@ export class Bot {
       const mode = research ? "research" : roomMode(store, roomId) === "letters" ? "letters" : "task";
       const res = await agent.turn(conversation, roomId, text, mode, roomProject(store, roomId));
       if (res.tokenDead) this.#vikunjaDown = true;
+      if (research && agent.researchEnabled) setResearch(store, conversation, !res.changed);
       await send(replyContent(res.reply, format, res.footer, res.alert));
       outcome = `Research done: ${res.searches} ${res.searches === 1 ? "search" : "searches"}, $${res.cost.toFixed(4)}.`;
     } catch (e) {

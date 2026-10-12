@@ -24,6 +24,8 @@ export interface ResearchProfile {
   maxCostPerRequest: number;
   // Web searches per request, over all its model calls
   maxSearches: number;
+  // Web pages opened per model call. 0 or unset: none
+  maxFetches?: number;
   reasoning?: ReasoningEffort;
 }
 
@@ -53,6 +55,8 @@ export interface TurnResult {
   reply: string;
   cost: number;
   searches: number;
+  // A task was created or changed (a task or decision recorded)
+  changed?: boolean;
   // Cost of this request and today's total, for the end of the reply. Unset when nothing was spent
   footer?: string;
   // Set when the request crossed the alert threshold
@@ -70,9 +74,10 @@ const MAX_SOURCES = 8;
 
 const credits = (n: number) => `$${n.toFixed(4)}`;
 
-export function costFooter(cost: number, searches: number, spentToday: number, dailyCap: number): string {
+export function costFooter(cost: number, searches: number, spentToday: number, dailyCap: number, fetches = 0): string {
   const parts = [credits(cost)];
   if (searches) parts.push(`${searches} ${searches === 1 ? "search" : "searches"}`);
+  if (fetches) parts.push(`${fetches} ${fetches === 1 ? "page" : "pages"} opened`);
   parts.push(`today ${credits(spentToday)} of $${dailyCap.toFixed(2)}`);
   return `— ${parts.join(" · ")}`;
 }
@@ -106,12 +111,13 @@ export function systemPrompt(mode: Mode, project?: RoomProject): string {
     "When the user asks you to note or record a decision, create one open task (not done): title \"Decision: \" and the decision in a few words; description with what was decided, the main reasons, the options ruled out, and today's date. Summarize, never copy the conversation into it. Only create a task as done when the user says it is already done.",
     "There is no delete tool. If the user wants a task deleted, mark it done or tell them to delete it in Vikunja.",
     "Chat commands start with \"!\" and are handled without you. If the user asks what commands exist or how to set something up, tell them to send !help.",
-    "Reply in the user's language.",
+    "Reply in the language the user writes their own messages in. Task titles, placeholders, context notes from Kesha and web pages in other languages don't change it; only switch when the user writes in another language or asks for one.",
     ...(mode === "research"
       ? [
-          "You can search the web. Use it for anything current or factual you aren't sure about, and prefer primary sources.",
-          "Placeholders mean nothing outside this chat: never put them in search queries. If a question depends on who a placeholder is, search for the general topic.",
-          "Lead with the answer, then the key facts. Simple Markdown is fine (**bold**, lists); no tables or headings. Sources are listed under your reply automatically, don't list URLs yourself.",
+          "You can search the web and open web pages. Use them for anything current or factual you aren't sure about, and prefer primary sources. Search in whatever language finds the best sources; still answer in the user's language.",
+          "Before you recommend a product, shop or offer, check it: open its page, or find it in search results, and confirm it exists, is the right model and is sold there. Only link pages you have seen in search results or opened. Big shops like Amazon often refuse automated visitors: if a page doesn't open, search for the product (by name, model number, or with the shop's name) and use what the results show, or check it at another shop. Say plainly what you couldn't verify instead of guessing.",
+          "Placeholders mean nothing outside this chat: never put them in search queries or URLs. If a question depends on who a placeholder is, search for the general topic.",
+          "Lead with the answer, then the key facts. Simple Markdown is fine (**bold**, lists, links); no tables or headings. Sources are listed under your reply automatically, don't repeat them as a list; do link the specific pages you recommend, like products.",
         ]
       : mode === "letters"
         ? [
@@ -198,6 +204,10 @@ export class Agent {
     this.#toolDefs = toolDefinitions(deps.tools);
   }
 
+  get researchEnabled(): boolean {
+    return this.#d.research !== undefined;
+  }
+
   get dailyCap(): number {
     return this.#d.limits.dailyCap;
   }
@@ -237,7 +247,7 @@ export class Agent {
       ? profile
       : {
           modelName: this.#d.modelName, maxSteps: limits.maxSteps, maxTokens: limits.maxTokens, maxCostPerRequest: limits.maxCostPerRequest,
-          maxSearches: 0, ...(limits.reasoning ? { reasoning: limits.reasoning } : {}),
+          maxSearches: 0, maxFetches: 0, ...(limits.reasoning ? { reasoning: limits.reasoning } : {}),
         };
 
     const spent = this.spentToday();
@@ -273,9 +283,10 @@ export class Agent {
 
     let cost = 0;
     let searches = 0;
+    let fetches = 0;
     const sources = new Map<string, string | undefined>();
     const finish = (reply: string, extra: Partial<TurnResult> = {}): TurnResult => ({
-      reply, cost, searches, ...(cost > 0 ? { footer: costFooter(cost, searches, spent + cost, limits.dailyCap) } : {}), ...extra,
+      reply, cost, searches, ...(cost > 0 ? { footer: costFooter(cost, searches, spent + cost, limits.dailyCap, fetches) } : {}), ...extra,
     });
     let reply: string | undefined;
     let tokenDead = false;
@@ -294,10 +305,12 @@ export class Agent {
       const res = await model.complete({
         model: run.modelName, messages, tools: this.#toolDefs, maxTokens: run.maxTokens, sessionId,
         ...(searchesLeft > 0 ? { webSearch: { maxSearches: searchesLeft } } : {}),
+        ...(searchesLeft > 0 && run.maxFetches ? { webFetch: { maxFetches: run.maxFetches } } : {}),
         ...(run.reasoning ? { reasoning: run.reasoning } : {}),
       });
       cost += res.cost;
       searches += res.searches;
+      fetches += res.fetches;
       for (const c of res.citations) if (!sources.has(c.url)) sources.set(c.url, c.title);
       store.logCall({
         thread, room, model: res.model, promptTokens: res.promptTokens, completionTokens: res.completionTokens, cost: res.cost,
@@ -353,6 +366,6 @@ export class Agent {
     const alert = cost >= limits.alertCost
       ? `This request cost ${credits(cost)}, above the alert threshold of ${credits(limits.alertCost)}.`
       : undefined;
-    return finish(reply + sourceList(sources), { ...(alert ? { alert } : {}), ...(tokenDead ? { tokenDead } : {}) });
+    return finish(reply + sourceList(sources), { changed, ...(alert ? { alert } : {}), ...(tokenDead ? { tokenDead } : {}) });
   }
 }

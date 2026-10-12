@@ -40,7 +40,7 @@ export function help(idleHours: number): string {
   return [
     `Write to me in plain language about your tasks. Each room is one conversation; it starts fresh after ${idleHours} h of silence or with !new.`,
     "",
-    "- `!r <question>` or `!research <question>`: answer this message with web search",
+    "- `!r <question>` or `!research <question>`: research with web search. Follow-ups stay in research until I record a task or decision, or `!new`",
     "- `!project <name>`: new tasks in this room go to that project. `!project` shows it, `!project none` removes it",
     "- `!mode letters`: this room drafts letters and emails (formal Czech by default). `!mode tasks` switches back, `!mode` shows it",
     "- `!today`, `!week`, `!open`: what's due today, this week, or all open tasks (this room's project, or all)",

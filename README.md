@@ -20,6 +20,8 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
   of a room are handled one at a time in arrival order. A message written inside a thread is answered in that thread
   but belongs to the room's conversation. Only users in `MATRIX_ALLOWED_USERS` are answered or can invite it, and
   only in encrypted rooms.
+- **Language:** Kesha answers in the language you write in, even when task titles, the room snapshot, search results
+  or opened pages are in another one. Letter drafts follow the letter's language, the notes around them yours.
 - **Replies are formatted:** simple Markdown from the model (bold, italic, lists, links, code) becomes Matrix HTML
   after escaping everything, only http(s) links. `(#41)` links to the task when `VIKUNJA_PUBLIC_URL` is set. The cost
   footer is small and grey.
@@ -49,16 +51,20 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
   "Rotate Kesha's Vikunja token" task in the inbox, due 3 days before expiry, and says so in Matrix.
   If Vikunja rejects the token later, Kesha stops using it and tells you.
 
-- **Research:** `!research <question>` or `!r <question>` answers that one message with `KESHA_RESEARCH_MODEL` and
-  web search (Exa through OpenRouter's `openrouter:web_search`, the engine that works with ZDR enforced) and the same
-  task tools, so findings can go straight into a task. The answer joins the room's conversation; the next message goes
-  to the task model again unless it starts with `!r`, so the expensive model never stays on by accident. A notice
-  shows "Researching…" and is edited with the result. Searches are capped per request, their sources are listed under
-  the reply. Search queries come from the pseudonymized conversation, so
-  placeholders never reach the search engine as real names. Exa has its own retention policy, ZDR doesn't cover it.
+- **Research:** `!research <question>` or `!r <question>` switches the conversation to `KESHA_RESEARCH_MODEL` with
+  web search and page fetching (Exa through OpenRouter's `openrouter:web_search` and `openrouter:web_fetch`, the
+  engine that works with ZDR enforced) and the same task tools, so findings can go straight into a task. Follow-ups
+  stay with the research model until it records a task or decision (any create or update), then the room's own model
+  takes over again; `!new` and the idle restart end it too. Each research message shows a "Researching…" notice that
+  is edited with the result. Searches are capped per request and opened pages per model call (each cut to ~6k tokens),
+  sources are listed under the reply. The model is told to open or find in search results every product or shop it
+  links, and to say what it couldn't verify (big shops often block automated visitors; Exa's crawl gets through more
+  often than a direct fetch). Search queries and URLs come from the pseudonymized conversation, so placeholders never
+  reach the search engine as real names. Exa has its own retention policy, ZDR doesn't cover it.
 - **Cost in every reply:** each answer ends with what the request cost, the number of web searches, and today's total
-  against the daily cap, e.g. `— $0.0251 · 2 searches · today $0.1520 of $1.00`. OpenRouter's reported cost
-  sometimes leaves the search fees out, so Kesha adds `KESHA_SEARCH_COST` per search when it does.
+  against the daily cap, e.g. `— $0.0251 · 2 searches · 1 page opened · today $0.1520 of $1.00`. OpenRouter's
+  reported cost sometimes leaves the search fees out, so Kesha adds `KESHA_SEARCH_COST` per search (and $0.001 per
+  opened page, when OpenRouter reports them) when it does.
 
 - **Release notes:** when a new version starts, Kesha posts its section of `CHANGELOG.md` to the room you last wrote
   in, once per version.
@@ -95,7 +101,7 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
   Request bodies in the call log are blanked after 30 days, costs stay.
 
 Commands in a chat, answered without the model and free: `!help`, `!today`, `!week`, `!open`, `!undo`, `!new`,
-`!project [name|none]`, `!mode [letters|tasks]`, `!notify-here`, `!releases-here`, `!cost`, `!cost week`. And `!research <question>` / `!r <question>`, which use the research model.
+`!project [name|none]`, `!mode [letters|tasks]`, `!notify-here`, `!releases-here`, `!cost`, `!cost week`. And `!research <question>` / `!r <question>`, which switch to the research model.
 
 ## Configuration
 
@@ -125,6 +131,7 @@ Environment variables:
 | `KESHA_RESEARCH_MAX_TOKENS` | `3000` | per model call |
 | `KESHA_RESEARCH_MAX_COST_PER_REQUEST` | `0.25` | credits (USD), search fees included |
 | `KESHA_RESEARCH_MAX_SEARCHES` | `6` | web searches per research request |
+| `KESHA_RESEARCH_MAX_FETCHES` | `5` | web pages opened per research model call (Exa, $0.001 each), `0` turns it off |
 | `KESHA_SEARCH_COST` | `0.007` | Exa's price per search, for the cost accounting |
 | `KESHA_LETTERS_MODEL` | `KESHA_MODEL` | model for rooms set with `!mode letters`, needs a ZDR endpoint |
 | `KESHA_LETTERS_MAX_STEPS` | `4` | model calls per request in letter rooms |

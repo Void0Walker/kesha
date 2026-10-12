@@ -160,6 +160,7 @@ export class Store {
     this.db.prepare("DELETE FROM threads WHERE thread = ?").run(thread);
     this.deleteState(`snapshot:${thread}`);
     this.deleteState(`note:${thread}`);
+    this.deleteState(`research:${thread}`);
   }
 
   recordChange(c: ChangeRow, now = Date.now()): void {

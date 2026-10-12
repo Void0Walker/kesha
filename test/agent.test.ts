@@ -15,7 +15,7 @@ const DICT = "people:\n  - names: [Jana Nováková, Jana]\n    forms: [Janě, Ja
 const LIMITS: Limits = { maxSteps: 5, maxTokens: 500, maxCostPerRequest: 0.05, alertCost: 0.02, dailyCap: 1 };
 const NOW = new Date("2026-10-06T10:00:00Z");
 
-const RESEARCH: ResearchProfile = { modelName: "test/research", maxSteps: 4, maxTokens: 2000, maxCostPerRequest: 0.2, maxSearches: 3 };
+const RESEARCH: ResearchProfile = { modelName: "test/research", maxSteps: 4, maxTokens: 2000, maxCostPerRequest: 0.2, maxSearches: 3, maxFetches: 2 };
 
 function setup(model: ScriptedModel, limits: Partial<Limits> = {}, research?: ResearchProfile, letters?: ResearchProfile) {
   const store = new Store(":memory:", "Europe/Berlin");
@@ -169,7 +169,8 @@ describe("research", () => {
       (req) => {
         assert.equal(req.model, "test/research");
         assert.deepEqual(req.webSearch, { maxSearches: 3 });
-        assert.match(String(req.messages[0]!.content), /search the web/);
+        assert.deepEqual(req.webFetch, { maxFetches: 2 });
+        assert.match(String(req.messages[0]!.content), /search the web and open web pages/);
         return {
           ...say("Node 24 is the current LTS, supported until April 2028."), searches: 2, cost: 0.02,
           citations: [{ url: "https://nodejs.org/en/about/previous-releases", title: "Node.js Releases" }, { url: "https://example.org/eol" }],
@@ -194,12 +195,27 @@ describe("research", () => {
       { ...toolCall("list_projects", {}), searches: 3 },
       (req) => {
         assert.equal(req.webSearch, undefined);
+        assert.equal(req.webFetch, undefined);
         return say("Done.");
       },
     ]);
     const { agent } = setup(model, {}, RESEARCH);
     const res = await agent.turn("t", "!room", "dig deep", "research");
     assert.equal(res.searches, 3);
+  });
+
+  it("counts opened pages in the footer and reports whether tasks changed", async () => {
+    const model = new ScriptedModel([
+      { ...say("The kettle is in stock at both shops."), searches: 1, fetches: 2, cost: 0.01 },
+      toolCall("create_task", { title: "Buy the kettle" }),
+      say("Added (#1)."),
+    ]);
+    const { agent } = setup(model, {}, RESEARCH);
+    const first = await agent.turn("t", "!room", "Is this kettle sold anywhere?", "research");
+    assert.equal(first.footer, "— $0.0100 · 1 search · 2 pages opened · today $0.0100 of $1.00");
+    assert.equal(first.changed, false);
+    const second = await agent.turn("t", "!room", "Add a task to buy it", "research");
+    assert.equal(second.changed, true);
   });
 
   it("applies the research cost cap instead of the task one", async () => {
@@ -212,7 +228,7 @@ describe("research", () => {
   });
 
   it("never offers web search in task threads", async () => {
-    const model = new ScriptedModel([(req) => (assert.equal(req.webSearch, undefined), say("ok"))]);
+    const model = new ScriptedModel([(req) => (assert.equal(req.webSearch, undefined), assert.equal(req.webFetch, undefined), say("ok"))]);
     const { agent } = setup(model, {}, RESEARCH);
     await agent.turn("t", "!room", "hi");
   });

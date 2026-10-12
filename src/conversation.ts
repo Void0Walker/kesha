@@ -28,6 +28,20 @@ export function activeConversations(store: Store): Set<string> {
   return new Set(rows.map((r) => conversationKey(r.key.slice("conv:".length), (JSON.parse(r.value) as ConversationState).epoch)));
 }
 
+// Set by !r: the conversation's follow-ups stay with the research model until a task or decision is recorded
+const researchKey = (conversation: string) => `research:${conversation}`;
+
+/** Whether this conversation is in research mode (started with !r, nothing recorded since). */
+export function inResearch(store: Store, conversation: string): boolean {
+  return store.getState(researchKey(conversation)) !== undefined;
+}
+
+/** After a research turn: stay in research, or go back to the room's model once a task or decision was recorded. */
+export function setResearch(store: Store, conversation: string, on: boolean): void {
+  if (on) store.setState(researchKey(conversation), "1");
+  else store.deleteState(researchKey(conversation));
+}
+
 /** The room's current conversation, without counting this as a message. Undefined before the first message. */
 export function peekConversation(store: Store, room: string): string | undefined {
   const raw = store.getState(stateKey(room));

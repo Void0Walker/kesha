@@ -67,6 +67,7 @@ const agent = new Agent({
           maxTokens: config.KESHA_RESEARCH_MAX_TOKENS,
           maxCostPerRequest: config.KESHA_RESEARCH_MAX_COST_PER_REQUEST,
           maxSearches: config.KESHA_RESEARCH_MAX_SEARCHES,
+          maxFetches: config.KESHA_RESEARCH_MAX_FETCHES,
           reasoning: config.KESHA_RESEARCH_REASONING_EFFORT,
         },
       }
