@@ -1,5 +1,7 @@
 import OpenAI from "openai";
-import type { ChatCompletionCreateParamsNonStreaming, ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions";
+import type {
+  ChatCompletionChunk, ChatCompletionCreateParamsStreaming, ChatCompletionMessageFunctionToolCall, ChatCompletionMessageParam, ChatCompletionTool,
+} from "openai/resources/chat/completions";
 
 export type Message = ChatCompletionMessageParam;
 
@@ -90,6 +92,76 @@ export interface OpenRouterOptions {
   zdr: boolean;
   searchCost: number;
   promptCache: PromptCache;
+  // Tests: a fake fetch and short timeouts
+  fetch?: typeof fetch;
+  idleTimeoutMs?: number;
+  callTimeoutMs?: number;
+}
+
+// Until OpenRouter answers with headers. Only this part is retried: nothing has run or been billed yet
+const HEADERS_TIMEOUT_MS = 60_000;
+// Streamed, a call fails only when the model goes quiet, not because searches, pages and reasoning take long
+const IDLE_TIMEOUT_MS = 120_000;
+// A stream that trickles forever still ends
+const CALL_TIMEOUT_MS = 300_000;
+
+/** The model stopped sending (or never finished). OpenRouter cancels the call upstream when the stream is dropped. */
+export class ModelTimeoutError extends Error {}
+
+type ToolUse = { web_search_requests?: number; web_fetch_requests?: number };
+type StreamUsage = NonNullable<ChatCompletionChunk["usage"]> & Partial<Usage> & { server_tool_use_details?: ToolUse; server_tool_use?: ToolUse };
+// OpenRouter's extensions to a streamed delta
+type ReasoningDetail = { index?: number; type?: string; [k: string]: unknown };
+type Annotation = { type: string; url_citation?: { url: string; title?: string } };
+type Delta = ChatCompletionChunk.Choice.Delta & { reasoning_details?: ReasoningDetail[]; annotations?: Annotation[] };
+
+/** Reasoning arrives in pieces per index (the docs only say "concatenate in order"): text is appended, the rest
+ * (signature, format) is set once. Pieces with different ids stay separate blocks. */
+function mergeReasoning(into: ReasoningDetail[], d: ReasoningDetail): void {
+  const prev = d.index === undefined
+    ? undefined
+    : into.find((x) => x.index === d.index && x.type === d.type && (x.id === undefined || d.id === undefined || x.id === d.id));
+  if (!prev) {
+    into.push({ ...d });
+    return;
+  }
+  for (const [k, v] of Object.entries(d)) {
+    if (v === undefined || v === null) continue;
+    prev[k] = (k === "text" || k === "summary" || k === "data") && typeof v === "string" ? `${(prev[k] as string | undefined) ?? ""}${v}` : v;
+  }
+}
+
+/** Collects a streamed answer into the message a non-streamed call would have returned. */
+class StreamedAnswer {
+  model = "";
+  content = "";
+  sawChoice = false;
+  finishReason: string | null = null;
+  usage: StreamUsage | undefined;
+  readonly toolCalls = new Map<number, ChatCompletionMessageFunctionToolCall>();
+  readonly reasoning: ReasoningDetail[] = [];
+  readonly annotations: Annotation[] = [];
+
+  add(chunk: ChatCompletionChunk): void {
+    if (chunk.model) this.model = chunk.model;
+    if (chunk.usage) this.usage = chunk.usage as StreamUsage;
+    const choice = chunk.choices[0];
+    if (!choice) return;
+    this.sawChoice = true;
+    if (choice.finish_reason) this.finishReason = choice.finish_reason;
+    const delta = choice.delta as Delta | undefined;
+    if (!delta) return;
+    if (delta.content) this.content += delta.content;
+    for (const t of delta.tool_calls ?? []) {
+      const call = this.toolCalls.get(t.index) ?? { id: "", type: "function", function: { name: "", arguments: "" } };
+      if (t.id) call.id = t.id;
+      if (t.function?.name) call.function.name += t.function.name;
+      if (t.function?.arguments) call.function.arguments += t.function.arguments;
+      this.toolCalls.set(t.index, call);
+    }
+    for (const d of delta.reasoning_details ?? []) mergeReasoning(this.reasoning, d);
+    this.annotations.push(...(delta.annotations ?? []));
+  }
 }
 
 /** OpenRouter through its OpenAI-compatible API. No agent framework: the loop and its caps live in agent.ts. */
@@ -98,7 +170,9 @@ export class OpenRouter implements ChatModel {
   readonly #o: OpenRouterOptions;
 
   constructor(o: OpenRouterOptions) {
-    this.#client = new OpenAI({ apiKey: o.apiKey, baseURL: o.baseURL, timeout: 120_000, maxRetries: 1 });
+    this.#client = new OpenAI({
+      apiKey: o.apiKey, baseURL: o.baseURL, timeout: HEADERS_TIMEOUT_MS, maxRetries: 1, ...(o.fetch ? { fetch: o.fetch } : {}),
+    });
     this.#o = o;
   }
 
@@ -113,6 +187,9 @@ export class OpenRouter implements ChatModel {
         ...(req.webSearch && req.webFetch ? [webFetchTool(req.webFetch.maxFetches)] : []),
       ],
       max_tokens: req.maxTokens,
+      // Streamed so a long call (searches, opened pages, reasoning) isn't mistaken for a dead one; usage comes last
+      stream: true,
+      stream_options: { include_usage: true },
       // OpenRouter extensions: never route to providers that store or train on prompts, bound the server tools
       // (max_tool_calls is shared by search and fetch, max_uses caps each)
       provider: { data_collection: "deny", ...(this.#o.zdr ? { zdr: true } : {}) },
@@ -121,26 +198,24 @@ export class OpenRouter implements ChatModel {
       ...(cached.topLevel ? { cache_control: cached.topLevel } : {}),
       ...(req.sessionId ? { session_id: req.sessionId } : {}),
     };
-    const res = await this.#client.chat.completions.create(body as unknown as ChatCompletionCreateParamsNonStreaming);
-    const choice = res.choices[0];
-    if (!choice) throw new Error("OpenRouter returned no choices");
-    type ToolUse = { web_search_requests?: number; web_fetch_requests?: number };
-    const usage = res.usage as (typeof res.usage & Partial<Usage> & { server_tool_use_details?: ToolUse; server_tool_use?: ToolUse }) | undefined;
+    const answer = await this.#stream(body as unknown as ChatCompletionCreateParamsStreaming);
+    if (!answer.sawChoice) throw new Error("OpenRouter returned no choices");
+    if (answer.finishReason === "error") throw new Error("OpenRouter ended the stream with an error");
+    const usage = answer.usage;
     if (usage?.cost === undefined) throw new Error("OpenRouter response has no usage.cost, can't enforce the cost caps");
     // The docs name it server_tool_use, responses seen so far server_tool_use_details
     const toolUse = usage.server_tool_use_details ?? usage.server_tool_use;
     const searches = toolUse?.web_search_requests ?? 0;
     const fetches = toolUse?.web_fetch_requests ?? 0;
-    const { content, tool_calls, annotations } = choice.message;
-    // Thinking models need their reasoning back on tool-call continuations within a turn
-    const reasoningDetails = (choice.message as { reasoning_details?: unknown[] }).reasoning_details;
+    const toolCalls = [...answer.toolCalls.entries()].sort(([a], [b]) => a - b).map(([, c]) => c);
     return {
       message: {
-        role: "assistant", content,
-        ...(tool_calls?.length ? { tool_calls } : {}),
-        ...(reasoningDetails?.length ? { reasoning_details: reasoningDetails } : {}),
+        role: "assistant", content: answer.content || null,
+        ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+        // Thinking models need their reasoning back on tool-call continuations within a turn
+        ...(answer.reasoning.length ? { reasoning_details: answer.reasoning } : {}),
       } as Completion["message"],
-      model: res.model,
+      model: answer.model || req.model,
       promptTokens: usage.prompt_tokens,
       completionTokens: usage.completion_tokens,
       cachedTokens: usage.prompt_tokens_details?.cached_tokens ?? 0,
@@ -149,8 +224,39 @@ export class OpenRouter implements ChatModel {
         searches * this.#o.searchCost + fetches * FETCH_COST),
       searches,
       fetches,
-      citations: (annotations ?? []).flatMap((a) =>
-        a.type === "url_citation" ? [{ url: a.url_citation.url, ...(a.url_citation.title ? { title: a.url_citation.title } : {}) }] : []),
+      citations: answer.annotations.flatMap((a) =>
+        a.type === "url_citation" && a.url_citation ? [{ url: a.url_citation.url, ...(a.url_citation.title ? { title: a.url_citation.title } : {}) }] : []),
     };
+  }
+
+  /** Reads the stream with a watchdog: dropped when nothing arrives for the idle timeout, or the call takes too long.
+   * Never retried once streaming: the searches would run, and be paid, again. */
+  async #stream(body: ChatCompletionCreateParamsStreaming): Promise<StreamedAnswer> {
+    const idleMs = this.#o.idleTimeoutMs ?? IDLE_TIMEOUT_MS;
+    const callMs = this.#o.callTimeoutMs ?? CALL_TIMEOUT_MS;
+    const stream = await this.#client.chat.completions.create(body);
+    const answer = new StreamedAnswer();
+    let timedOut: string | undefined;
+    const stop = (why: string) => {
+      timedOut = why;
+      stream.controller.abort();
+    };
+    const deadline = setTimeout(() => stop(`the model didn't finish within ${callMs / 1000} s`), callMs);
+    const idle = setTimeout(() => stop(`the model sent nothing for ${idleMs / 1000} s`), idleMs);
+    try {
+      for await (const chunk of stream) {
+        idle.refresh();
+        answer.add(chunk);
+      }
+    } catch (e) {
+      if (timedOut) throw new ModelTimeoutError(timedOut, { cause: e });
+      throw e;
+    } finally {
+      clearTimeout(idle);
+      clearTimeout(deadline);
+    }
+    // Aborted between chunks, the iterator can end quietly instead of throwing
+    if (timedOut) throw new ModelTimeoutError(timedOut);
+    return answer;
   }
 }

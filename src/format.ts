@@ -1,7 +1,7 @@
 // Markdown-ish model replies to the HTML subset Element renders. Everything is escaped first, so neither model output
 // nor task titles can inject markup; only http(s) links are made clickable.
 
-const escapeHtml = (s: string) =>
+export const escapeHtml = (s: string) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
 export interface FormatOptions {

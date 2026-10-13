@@ -92,6 +92,14 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
   mode starts a new conversation.
 - **Notifications:** reminders and warnings go to the room set with `!notify-here`, release notes to the one set with
   `!releases-here`, otherwise to the room the user last wrote in.
+- **Error reports:** only after `!errors-here`: failed requests and commands, model timeouts, housekeeping errors and
+  crashes go to that room with the error, its cause and the first stack frames (a crash is kept in SQLite and reported
+  by the next start). The same failure is sent at most once per 15 minutes, then with a count of the repeats.
+  `!errors-here off` stops them; without it errors only go to `docker logs`.
+- **Model calls are streamed:** a call fails only when OpenRouter sends nothing for 2 minutes or the call passes 5
+  minutes, so research with searches, opened pages and reasoning isn't cut off for being slow. Only the wait for the
+  first response is retried once: a call that already streams is never sent again, since its searches would run (and
+  be paid) twice. When Kesha drops a stream, OpenRouter cancels the call upstream.
 
 - **Token economy:** the system prompt and tool schemas are identical in every call (the send time goes on each user
   message instead), so Anthropic models read them from the prompt cache at a tenth of the price, and OpenRouter keeps a
@@ -101,7 +109,7 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
   Request bodies in the call log are blanked after 30 days, costs stay.
 
 Commands in a chat, answered without the model and free: `!help`, `!today`, `!week`, `!open`, `!undo`, `!new`,
-`!project [name|none]`, `!mode [letters|tasks]`, `!notify-here`, `!releases-here`, `!cost`, `!cost week`. And `!research <question>` / `!r <question>`, which switch to the research model.
+`!project [name|none]`, `!mode [letters|tasks]`, `!notify-here`, `!releases-here`, `!errors-here [off]`, `!cost`, `!cost week`. And `!research <question>` / `!r <question>`, which switch to the research model.
 
 ## Configuration
 

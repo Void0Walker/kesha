@@ -8,7 +8,7 @@ import type { Project, Task, VikunjaApi } from "./vikunja.ts";
 
 // Chat commands other than !research. They never reach the model.
 
-export type NotifyKind = "alerts" | "releases";
+export type NotifyKind = "alerts" | "releases" | "errors";
 
 export interface RoomProject {
   id: number;
@@ -31,9 +31,11 @@ export function roomProject(store: Store, room: string): RoomProject | undefined
   return s ? (JSON.parse(s) as RoomProject) : undefined;
 }
 
-/** Where notifications of this kind go: the room set with !notify-here or !releases-here, else the room last used. */
+/** Where notifications of this kind go: the room set with !notify-here, !releases-here or !errors-here, else the room
+ * last used. Error reports only go to a room set for them. */
 export function notifyRoom(store: Store, kind: NotifyKind): string | undefined {
-  return store.getState(`notify-room:${kind}`) ?? store.getState("alert-room");
+  const set = store.getState(`notify-room:${kind}`);
+  return kind === "errors" ? set : set ?? store.getState("alert-room");
 }
 
 export function help(idleHours: number): string {
@@ -48,6 +50,7 @@ export function help(idleHours: number): string {
     "- `!new`: start a fresh conversation in this room",
     "- `!notify-here`: reminders and warnings go to this room",
     "- `!releases-here`: release notes go to this room",
+    "- `!errors-here`: details of my errors go to this room, `!errors-here off` stops them",
     "- `!cost`: today's spend, `!cost week`: the last 7 days",
     "- `!help`: this list",
   ].join("\n");
@@ -98,6 +101,13 @@ export async function runCommand(d: CommandDeps, room: string, body: string): Pr
       d.store.setState("notify-room:releases", room);
       markAnnounced(d.store, d.version);
       return `Release notes go to this room from now on.\n\n${releaseText(d.version, d.changelog)}`;
+    case "errors-here":
+      if (/^(none|off)$/i.test(arg)) {
+        d.store.deleteState("notify-room:errors");
+        return "I don't send error details any more, they're only in my logs.";
+      }
+      d.store.setState("notify-room:errors", room);
+      return "Details of my errors (failed requests, timeouts, crashes) go to this room from now on. `!errors-here off` stops them.";
     case "project":
       return projectCommand(d, room, arg);
     case "mode":

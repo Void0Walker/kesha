@@ -2,6 +2,11 @@
 
 Kesha posts the section of a new version to the chat once it runs. Keep entries short and written for the user.
 
+## 1.3.0
+
+- Long research no longer fails after two minutes: I read the answer while it's being written, and only give up when the model goes quiet for two minutes. If that happens I say so instead of "something went wrong".
+- `!errors-here`: when something fails (a request, a timeout, a crash), the details go to this room, so you don't need the server logs. The same failure is reported at most once per 15 minutes. `!errors-here off` stops it.
+
 ## 1.2.0
 
 - I answer in the language you write in, even when your tasks or the pages I read are in another one.

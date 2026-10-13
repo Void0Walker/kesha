@@ -3,7 +3,9 @@ import { MatrixClient, RustSdkCryptoStorageProvider, SimpleFsStorageProvider } f
 import type { Agent } from "./agent.ts";
 import { notifyRoom, roomMode, roomProject, runCommand, type NotifyKind } from "./commands.ts";
 import { currentConversation, inResearch, setResearch } from "./conversation.ts";
+import { ErrorReporter } from "./errors.ts";
 import { replyContent, type FormatOptions, type MatrixText } from "./format.ts";
+import { ModelTimeoutError } from "./llm.ts";
 import type { Store } from "./store.ts";
 import { VikunjaAuthError, type VikunjaApi } from "./vikunja.ts";
 
@@ -45,12 +47,19 @@ export class Bot {
   readonly #o: BotOptions;
   // A room is one conversation: its messages are handled strictly in arrival order, one at a time
   readonly #queues = new Map<string, Promise<void>>();
+  readonly #errors: ErrorReporter;
   #vikunjaDown = false;
   #startedAt = 0;
   #userId = "";
 
   constructor(o: BotOptions) {
     this.#o = o;
+    this.#errors = new ErrorReporter(async (content) => {
+      const room = notifyRoom(o.store, "errors");
+      if (!room) return false;
+      await this.client.sendMessage(room, content);
+      return true;
+    });
     // The crypto store belongs to the device of the access token. A new token needs an empty crypto directory
     this.client = new MatrixClient(
       o.homeserverUrl,
@@ -93,6 +102,12 @@ export class Bot {
     return true;
   }
 
+  /** Logs a failure and reports it to the room set with !errors-here. Never throws. */
+  async failed(what: string, e: unknown, room?: string): Promise<void> {
+    console.error(`${what}:`, e);
+    await this.#errors.report(what, e, room);
+  }
+
   setVikunjaDown(down: boolean): void {
     this.#vikunjaDown = down;
   }
@@ -108,7 +123,7 @@ export class Bot {
 
     const run = (this.#queues.get(roomId) ?? Promise.resolve())
       .then(() => this.#handle(roomId, ev, body, relation))
-      .catch((e) => console.error("message handling failed:", e));
+      .catch((e) => this.failed("Message handling failed", e, roomId));
     this.#queues.set(roomId, run);
     void run.then(() => {
       if (this.#queues.get(roomId) === run) this.#queues.delete(roomId);
@@ -146,7 +161,8 @@ export class Bot {
       }
     } catch (e) {
       if (e instanceof VikunjaAuthError) this.#vikunjaDown = true;
-      console.error("command failed:", e);
+      // Not awaited: the reply shouldn't wait for the report
+      void this.failed(`Command failed: ${body.split(/\s/)[0]}`, e, roomId);
       await reply("That command failed, I couldn't reach Vikunja. Details are in my logs.");
       return;
     }
@@ -180,8 +196,13 @@ export class Bot {
       await send(replyContent(res.reply, format, res.footer, res.alert));
       outcome = `Research done: ${res.searches} ${res.searches === 1 ? "search" : "searches"}, $${res.cost.toFixed(4)}.`;
     } catch (e) {
-      console.error("turn failed:", e);
-      await reply("Something went wrong on my side, nothing was changed after the error. Details are in my logs.");
+      void this.failed(research ? "Research failed" : "Request failed", e, roomId);
+      if (e instanceof ModelTimeoutError) {
+        outcome = "Research timed out.";
+        await reply(`The model stopped answering (${e.message}), so I gave up. Nothing was changed after that. Try again, or ask something narrower.`);
+      } else {
+        await reply("Something went wrong on my side, nothing was changed after the error. Details are in my logs.");
+      }
     } finally {
       clearInterval(renew);
       await this.client.setTyping(roomId, false).catch(() => {});

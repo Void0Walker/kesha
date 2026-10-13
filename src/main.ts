@@ -4,6 +4,7 @@ import { LogLevel, LogService } from "matrix-bot-sdk";
 import { Agent } from "./agent.ts";
 import { Anonymizer, parseDictionary } from "./anonymizer.ts";
 import { loadConfig } from "./config.ts";
+import { describeError, PastError } from "./errors.ts";
 import { checkTokenExpiry } from "./expiry.ts";
 import { OpenRouter } from "./llm.ts";
 import { Bot } from "./matrix.ts";
@@ -34,12 +35,24 @@ const dictionary = parseDictionary(readFileSync(config.KESHA_PII_FILE, "utf8"));
 console.log(`pii: ${dictionary.length} dictionary entries`);
 
 const store = new Store(join(config.KESHA_DATA_DIR, "kesha.sqlite"), config.KESHA_TIMEZONE);
+
+// A crash can't be reported while it happens: it's kept and reported by the next start, once Matrix is up
+const CRASH_KEY = "last-crash";
+function crash(what: string, e: unknown): never {
+  console.error(`${what}:`, e);
+  try {
+    store.setState(CRASH_KEY, JSON.stringify({ what, error: describeError(e) }));
+  } catch {}
+  process.exit(1);
+}
+process.on("uncaughtException", (e) => crash("Crashed", e));
+process.on("unhandledRejection", (e) => crash("Crashed on an unhandled rejection", e));
+
 const vikunja = new Vikunja(config.VIKUNJA_URL, config.VIKUNJA_TOKEN);
 try {
   await vikunja.check();
 } catch (e) {
-  console.error(e instanceof VikunjaAuthError ? "startup check: Vikunja token expired or revoked" : `startup check: Vikunja unreachable: ${e}`);
-  process.exit(1);
+  crash(e instanceof VikunjaAuthError ? "Startup check: Vikunja token expired or revoked" : "Startup check: Vikunja unreachable", e);
 }
 console.log("vikunja: token works");
 console.log(`models: ${config.KESHA_MODEL}, research ${config.KESHA_RESEARCH_MODEL ?? "off"}, letters ${config.KESHA_LETTERS_MODEL ?? config.KESHA_MODEL}`);
@@ -103,10 +116,16 @@ const bot = new Bot({
   format: config.VIKUNJA_PUBLIC_URL ? { vikunjaUrl: config.VIKUNJA_PUBLIC_URL } : {},
 });
 await bot.start();
+const lastCrash = store.getState(CRASH_KEY);
+if (lastCrash) {
+  store.deleteState(CRASH_KEY);
+  const { what, error } = JSON.parse(lastCrash) as { what: string; error: string };
+  await bot.failed(`${what}, then restarted`, new PastError(error));
+}
 try {
   if ((await announceRelease({ version, changelog, store, notify: (t) => bot.notify(t, "releases") })) === "announced") console.log(`announced ${version}`);
 } catch (e) {
-  console.error("release announcement failed:", e);
+  await bot.failed("Release announcement failed", e);
 }
 
 async function housekeeping() {
@@ -132,7 +151,7 @@ async function housekeeping() {
       console.error("vikunja: token expired or revoked");
       await bot.notify("My Vikunja token expired or was revoked. Rotate it (README, \"Rotating the Kesha Vikunja token\").").catch(() => {});
     } else {
-      console.error("housekeeping failed:", e);
+      await bot.failed("Housekeeping failed", e);
     }
   }
 }

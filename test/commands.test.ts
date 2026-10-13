@@ -91,6 +91,16 @@ describe("commands", () => {
     assert.equal(notifyRoom(store, "releases"), "!last");
   });
 
+  it("sends error details only to a room set with !errors-here, until !errors-here off", async () => {
+    const { store, run } = setup();
+    store.setState("alert-room", "!last");
+    assert.equal(notifyRoom(store, "errors"), undefined);
+    assert.match((await run("!errors-here", "!errs"))!, /Details of my errors .* go to this room/);
+    assert.equal(notifyRoom(store, "errors"), "!errs");
+    assert.match((await run("!errors-here off", "!other"))!, /only in my logs/);
+    assert.equal(notifyRoom(store, "errors"), undefined);
+  });
+
   it("!releases-here posts the current notes there and doesn't announce them again", async () => {
     const { store, deps, run } = setup();
     assert.equal(await run("!releases-here", "!rel"), "Release notes go to this room from now on.\n\nKesha 1.2.0 is running. What's new:\n- Rooms.");
