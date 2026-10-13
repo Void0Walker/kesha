@@ -161,6 +161,7 @@ export class Store {
     this.deleteState(`snapshot:${thread}`);
     this.deleteState(`note:${thread}`);
     this.deleteState(`research:${thread}`);
+    this.deleteState(`language:${thread}`);
   }
 
   recordChange(c: ChangeRow, now = Date.now()): void {

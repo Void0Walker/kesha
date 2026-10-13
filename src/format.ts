@@ -37,7 +37,8 @@ function inline(text: string, o: FormatOptions): string {
   return out + emphasis(escapeHtml(text.slice(last)), o);
 }
 
-/** Paragraphs, line breaks, "-"/"*"/"•" and "1." lists, inline formatting. */
+/** Paragraphs, line breaks, "-"/"*"/"•" and "1." lists, inline formatting. Headings and "---" rules, which models
+ * write although told not to, become a bold line and a rule instead of showing as raw "###". */
 export function markdownToHtml(text: string, o: FormatOptions = {}): string {
   const blocks: string[] = [];
   let list: { tag: "ul" | "ol"; items: string[] } | undefined;
@@ -51,6 +52,13 @@ export function markdownToHtml(text: string, o: FormatOptions = {}): string {
     list = undefined;
   };
   for (const line of text.split("\n")) {
+    const heading = /^\s*#{1,6}\s+(.*?)\s*#*\s*$/.exec(line);
+    if (heading || /^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
+      flushList();
+      flushPara();
+      blocks.push(heading ? `<p><strong>${inline(heading[1]!.replace(/^\*\*(.*)\*\*$/, "$1"), o)}</strong></p>` : "<hr>");
+      continue;
+    }
     const bullet = /^\s*[-*•]\s+(.*)$/.exec(line);
     const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
     const item = bullet ?? numbered;

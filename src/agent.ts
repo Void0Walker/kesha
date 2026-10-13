@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Anonymizer, ProviderRedactionError, rejectProviderRedactions, UnknownPlaceholderError } from "./anonymizer.ts";
+import { detectLanguage, languageNote } from "./language.ts";
 import type { ChatModel, Message, ReasoningEffort } from "./llm.ts";
 import type { RoomProject } from "./commands.ts";
 import type { Store } from "./store.ts";
@@ -111,10 +112,10 @@ export function systemPrompt(mode: Mode, project?: RoomProject): string {
     "When the user asks you to note or record a decision, create one open task (not done): title \"Decision: \" and the decision in a few words; description with what was decided, the main reasons, the options ruled out, and today's date. Summarize, never copy the conversation into it. Only create a task as done when the user says it is already done.",
     "There is no delete tool. If the user wants a task deleted, mark it done or tell them to delete it in Vikunja.",
     "Chat commands start with \"!\" and are handled without you. If the user asks what commands exist or how to set something up, tell them to send !help.",
-    "Reply in the language the user writes their own messages in. Task titles, placeholders, context notes from Kesha and web pages in other languages don't change it; only switch when the user writes in another language or asks for one.",
+    "Reply in the language the user writes their own messages in. Task titles, placeholders, context notes from Kesha and web pages in other languages don't change it, and neither does a country named in the question (\"look in Czech stores\" is where to look, not the language to answer in); only switch when the user writes in another language or asks for one.",
     ...(mode === "research"
       ? [
-          "You can search the web and open web pages. Use them for anything current or factual you aren't sure about, and prefer primary sources. Search in whatever language finds the best sources; still answer in the user's language.",
+          "You can search the web and open web pages. Use them for anything current or factual you aren't sure about, and prefer primary sources. Search in whatever language finds the best sources (a country's own language for its shops); still answer in the user's language.",
           "Before you recommend a product, shop or offer, check it: open its page, or find it in search results, and confirm it exists, is the right model and is sold there. Only link pages you have seen in search results or opened. Big shops like Amazon often refuse automated visitors: if a page doesn't open, search for the product (by name, model number, or with the shop's name) and use what the results show, or check it at another shop. Say plainly what you couldn't verify instead of guessing.",
           "Placeholders mean nothing outside this chat: never put them in search queries or URLs. If a question depends on who a placeholder is, search for the general topic.",
           "Lead with the answer, then the key facts. Simple Markdown is fine (**bold**, lists, links); no tables or headings. Sources are listed under your reply automatically, don't repeat them as a list; do link the specific pages you recommend, like products.",
@@ -180,6 +181,8 @@ export function snapshotText(tasks: Task[], at: string, timeZone: string): strin
 }
 
 const snapshotKey = (conversation: string) => `snapshot:${conversation}`;
+// The language the user last wrote research questions in
+export const languageKey = (conversation: string) => `language:${conversation}`;
 const noteKey = (conversation: string) => `note:${conversation}`;
 
 /** The conversation's snapshot no longer matches Vikunja: the next message gets a fresh one. */
@@ -266,6 +269,13 @@ export class Agent {
     if (note) content += `\n\n${anonymizer.anonymize(thread, `(Context from Kesha, not from the user: ${note})`).text}`;
     const snapshot = await this.#snapshot(thread, project, stamp);
     if (snapshot) content += `\n\n${anonymizer.anonymize(thread, snapshot).text}`;
+    // The research model answered "Look in Czech stores" in Czech despite the rule above (2026-10-13): the language,
+    // named right after the user's words, is what it follows. A short follow-up keeps the conversation's language
+    if (mode === "research") {
+      const detected = detectLanguage(userText);
+      if (detected) store.setState(languageKey(thread), detected);
+      content += `\n\n${languageNote(detected ?? store.getState(languageKey(thread)))}`;
+    }
     history.push({ role: "user", content });
     const promptProject = project && { id: project.id, title: anonymizer.anonymize(thread, project.title).text };
     // Built once per turn: identical bytes in every call keep the prompt cache warm

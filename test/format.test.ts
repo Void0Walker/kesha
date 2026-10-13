@@ -34,6 +34,15 @@ describe("markdownToHtml", () => {
   it("makes no task links without a Vikunja URL", () => {
     assert.equal(markdownToHtml("Moved (#41)."), "<p>Moved (#41).</p>");
   });
+
+  it("turns headings into bold lines and --- into rules", () => {
+    assert.equal(
+      markdownToHtml("Intro\n---\n### 🏆 Best **value**\n**Airbi SMILE** – 249 Kč\n- LCD\n\n## **Premium** ##\n* * *"),
+      "<p>Intro</p><hr><p><strong>🏆 Best <strong>value</strong></strong></p><p><strong>Airbi SMILE</strong> – 249 Kč</p><ul><li>LCD</li></ul><p><strong>Premium</strong></p><hr>",
+    );
+    // Not headings: no space after #, a task id, a bullet
+    assert.equal(markdownToHtml("#hashtag (#41)\n- item"), "<p>#hashtag (#41)</p><ul><li>item</li></ul>");
+  });
 });
 
 describe("replyContent", () => {

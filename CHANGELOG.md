@@ -2,6 +2,11 @@
 
 Kesha posts the section of a new version to the chat once it runs. Keep entries short and written for the user.
 
+## 1.4.0
+
+- Research answers in the language you wrote in, also when you ask me to look in Czech shops. Before, "look in Czech stores" got a Czech answer.
+- Headings and dividers in my replies show as bold lines and rules instead of raw `###` and `---`.
+
 ## 1.3.0
 
 - Long research no longer fails after two minutes: I read the answer while it's being written, and only give up when the model goes quiet for two minutes. If that happens I say so instead of "something went wrong".

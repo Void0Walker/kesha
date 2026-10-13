@@ -218,6 +218,25 @@ describe("research", () => {
     assert.equal(second.changed, true);
   });
 
+  it("names the user's language after their words, and keeps it for short follow-ups", async () => {
+    const model = new ScriptedModel([say("Here are three."), say("The cheapest is…"), say("Hotovo.")]);
+    const { agent } = setup(model, {}, RESEARCH);
+    const lastUser = (i: number) => String(model.requests[i]!.messages.findLast((m) => m.role === "user")!.content);
+    await agent.turn("t", "!room", "find me some good thermometer and humidity meter. Look in Czech stores.", "research");
+    assert.match(lastUser(0), /Look in Czech stores\.\n\n\(Context from Kesha, not from the user: the user writes in English\. Reply in English/);
+    await agent.turn("t", "!room", "cheaper?", "research");
+    assert.match(lastUser(1), /^\[[^\]]+\] cheaper\?\n\n\(Context from Kesha, not from the user: the user writes in English\./);
+    await agent.turn("t", "!room", "najdi mi ještě nějaký levnější", "research");
+    assert.match(lastUser(2), /the user writes in Czech\. Reply in Czech/);
+  });
+
+  it("adds no language note outside research", async () => {
+    const model = new ScriptedModel([say("Done.")]);
+    const { agent } = setup(model, {}, RESEARCH);
+    await agent.turn("t", "!room", "find me my tasks for today", "task");
+    assert.doesNotMatch(model.sent(), /Context from Kesha, not from the user: the user writes in/);
+  });
+
   it("applies the research cost cap instead of the task one", async () => {
     // 0.06 per call is over the task cap (0.05) after one call, and over the research cap (0.2) after the fourth
     const model = new ScriptedModel(Array.from({ length: 6 }, () => toolCall("list_projects", {})), 0.06);
