@@ -22,6 +22,10 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
   only in encrypted rooms.
 - **Language:** Kesha answers in the language you write in, even when task titles, the room snapshot, search results
   or opened pages are in another one. Letter drafts follow the letter's language, the notes around them yours.
+- **Voice messages** are transcribed by the Whistle service in the tools repo (`KESHA_TRANSCRIBE_URL`, English only,
+  no Czech) and then handled like typed text, with the transcript shown at the top of the reply. "command <name> ..."
+  spoken is `!<name> ...` typed. Audio is decrypted in memory and never stored; the transcript goes through the same
+  pseudonymization as any message. The original voice message stays in the room.
 - **Replies are formatted:** simple Markdown from the model (bold, italic, lists, links, code) becomes Matrix HTML
   after escaping everything, only http(s) links. `(#41)` links to the task when `VIKUNJA_PUBLIC_URL` is set. The cost
   footer is small and grey.
@@ -155,6 +159,7 @@ Environment variables:
 | `KESHA_DATA_DIR` | `/data` | SQLite and Matrix stores |
 | `KESHA_TIMEZONE` | `Europe/Berlin` | for "tomorrow", dates given without a time, and the daily cap |
 | `KESHA_CONVERSATION_IDLE_HOURS` | `3` | a room's conversation starts over after this much silence |
+| `KESHA_TRANSCRIBE_URL` | | the Whistle transcription service, e.g. `http://whistle:8080`. Unset: voice messages get a note that there is none |
 
 Dictionary format:
 
