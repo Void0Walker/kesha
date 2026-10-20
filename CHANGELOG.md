@@ -2,6 +2,14 @@
 
 Kesha posts the section of a new version to the chat once it runs. Keep entries short and written for the user.
 
+## 1.6.0
+
+- A due date without a time ("on 2026-10-24") is noon of that day in your time zone, not midnight UTC.
+- Finishing a repeating task works as Vikunja means it: the occurrence is done and the task comes back with the next date. I say so instead of reporting a failed write. Task lists mark tasks that repeat.
+- When Vikunja doesn't answer or times out, I tell you instead of failing with "something went wrong".
+- After a longer outage I post one notice per room saying which older messages I'm not answering, so you can send them again.
+- Stopping or updating me waits for replies in progress instead of cutting them off.
+
 ## 1.5.0
 
 - `!cost` shows what this month has cost so far, with the daily average. `!cost today` is the old answer, today against the daily cap; `!cost week` is unchanged.

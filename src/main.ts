@@ -63,7 +63,14 @@ const agent = new Agent({
     apiKey: config.OPENROUTER_API_KEY, baseURL: config.OPENROUTER_BASE_URL, zdr: config.OPENROUTER_ZDR,
     searchCost: config.KESHA_SEARCH_COST, promptCache: config.KESHA_PROMPT_CACHE,
   }),
-  modelName: config.KESHA_MODEL,
+  task: {
+    modelName: config.KESHA_MODEL,
+    maxSteps: config.KESHA_MAX_STEPS,
+    maxTokens: config.KESHA_MAX_TOKENS,
+    maxCostPerRequest: config.KESHA_MAX_COST_PER_REQUEST,
+    maxSearches: 0,
+    ...(config.KESHA_REASONING_EFFORT ? { reasoning: config.KESHA_REASONING_EFFORT } : {}),
+  },
   letters: {
     modelName: config.KESHA_LETTERS_MODEL ?? config.KESHA_MODEL,
     maxSteps: config.KESHA_LETTERS_MAX_STEPS,
@@ -85,19 +92,12 @@ const agent = new Agent({
         },
       }
     : {}),
-  tools: createTools(vikunja, config.VIKUNJA_INBOX_PROJECT_ID, (term) => anonymizer.variants(term)),
+  tools: createTools(vikunja, { inboxProjectId: config.VIKUNJA_INBOX_PROJECT_ID, variants: (term) => anonymizer.variants(term), timeZone: config.KESHA_TIMEZONE }),
   // Two pages are plenty for the 30 tasks shown, and keep the snapshot to at most two requests
   listOpenTasks: async (projectId) => (await openTasks(vikunja, projectId, 2)).tasks,
   anonymizer,
   store,
-  limits: {
-    maxSteps: config.KESHA_MAX_STEPS,
-    maxTokens: config.KESHA_MAX_TOKENS,
-    maxCostPerRequest: config.KESHA_MAX_COST_PER_REQUEST,
-    alertCost: config.KESHA_ALERT_COST,
-    dailyCap: config.KESHA_DAILY_COST_CAP,
-    ...(config.KESHA_REASONING_EFFORT ? { reasoning: config.KESHA_REASONING_EFFORT } : {}),
-  },
+  limits: { alertCost: config.KESHA_ALERT_COST, dailyCap: config.KESHA_DAILY_COST_CAP },
   timeZone: config.KESHA_TIMEZONE,
 });
 
@@ -128,14 +128,15 @@ try {
   await bot.failed("Release announcement failed", e);
 }
 
+// Hourly. Nothing in here may take the process down: a failure is reported and tried again next hour
 async function housekeeping() {
-  const forgotten = store.forgetIdleThreads(IDLE_THREAD_MS);
-  const ended = store.forgetEndedConversations(activeConversations(store), ENDED_CONVERSATION_MS);
-  if (forgotten + ended) console.log(`pii: forgot ${forgotten + ended} conversation(s)`);
-  store.pruneChanges(CHANGES_MS);
-  const blanked = store.pruneCallBodies(CALL_BODIES_MS);
-  if (blanked) console.log(`calls: blanked ${blanked} request bodies older than 30 days`);
   try {
+    const forgotten = store.forgetIdleThreads(IDLE_THREAD_MS);
+    const ended = store.forgetEndedConversations(activeConversations(store), ENDED_CONVERSATION_MS);
+    if (forgotten + ended) console.log(`pii: forgot ${forgotten + ended} conversation(s)`);
+    store.pruneChanges(CHANGES_MS);
+    const blanked = store.pruneCallBodies(CALL_BODIES_MS);
+    if (blanked) console.log(`calls: blanked ${blanked} request bodies older than 30 days`);
     const r = await checkTokenExpiry({
       expires: config.VIKUNJA_TOKEN_EXPIRES,
       today: store.today(),
@@ -158,10 +159,18 @@ async function housekeeping() {
 await housekeeping();
 setInterval(() => void housekeeping(), HOUSEKEEPING_MS);
 
+// Docker gives 10 s: stop taking messages, let the requests in flight send their replies, then close the database
+const DRAIN_MS = 8_000;
+let stopping = false;
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.on(signal, () => {
+    if (stopping) return;
+    stopping = true;
     bot.stop();
-    store.db.close();
-    process.exit(0);
+    void bot.drain(DRAIN_MS).then((pending) => {
+      if (pending) console.warn(`stopped with ${pending} request(s) still running`);
+      store.db.close();
+      process.exit(0);
+    });
   });
 }

@@ -49,6 +49,15 @@ describe("vikunja client", () => {
     await assert.rejects(new Vikunja("https://p.example", "tk", dead.f).check(), VikunjaAuthError);
   });
 
+  it("turns a failed connection or timeout into a VikunjaError without status", async () => {
+    const refused = (async () => { throw new TypeError("fetch failed", { cause: new Error("ECONNREFUSED") }); }) as unknown as typeof fetch;
+    await assert.rejects(new Vikunja("https://p.example", "tk", refused).getTask(1), (e) => {
+      return e instanceof VikunjaError && !(e instanceof VikunjaAuthError) && e.status === 0 && /unreachable/.test(e.message);
+    });
+    const slow = (async () => { throw new DOMException("The operation was aborted due to timeout", "TimeoutError"); }) as unknown as typeof fetch;
+    await assert.rejects(new Vikunja("https://p.example", "tk", slow).getTask(1), /did not answer within 15 s/);
+  });
+
   it("surfaces Vikunja's error message", async () => {
     const { f } = fakeFetch(() => ({ status: 404, json: { message: "The task does not exist." } }));
     await assert.rejects(new Vikunja("https://p.example", "tk", f).getTask(1), /The task does not exist/);

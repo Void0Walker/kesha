@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { Agent, compactHistory, costFooter, sentAt, snapshotText, trimHistory, type Limits, type ResearchProfile } from "../src/agent.ts";
+import { Agent, compactHistory, costFooter, sentAt, snapshotText, trimHistory, type Limits, type ModelProfile } from "../src/agent.ts";
 import type { Message } from "../src/llm.ts";
 import { Anonymizer, parseDictionary } from "../src/anonymizer.ts";
 import { Store } from "../src/store.ts";
@@ -12,18 +12,19 @@ import { VikunjaAuthError } from "../src/vikunja.ts";
 import { FakeVikunja, say, ScriptedModel, toolCall } from "./fakes.ts";
 
 const DICT = "people:\n  - names: [Jana Nováková, Jana]\n    forms: [Janě, Jany]\n";
-const LIMITS: Limits = { maxSteps: 5, maxTokens: 500, maxCostPerRequest: 0.05, alertCost: 0.02, dailyCap: 1 };
+const TASK: ModelProfile = { modelName: "test/model", maxSteps: 5, maxTokens: 500, maxCostPerRequest: 0.05, maxSearches: 0 };
+const LIMITS: Limits = { alertCost: 0.02, dailyCap: 1 };
 const NOW = new Date("2026-10-06T10:00:00Z");
 
-const RESEARCH: ResearchProfile = { modelName: "test/research", maxSteps: 4, maxTokens: 2000, maxCostPerRequest: 0.2, maxSearches: 3, maxFetches: 2 };
+const RESEARCH: ModelProfile = { modelName: "test/research", maxSteps: 4, maxTokens: 2000, maxCostPerRequest: 0.2, maxSearches: 3, maxFetches: 2 };
 
-function setup(model: ScriptedModel, limits: Partial<Limits> = {}, research?: ResearchProfile, letters?: ResearchProfile) {
+function setup(model: ScriptedModel, limits: Partial<Limits> = {}, research?: ModelProfile, letters?: ModelProfile) {
   const store = new Store(":memory:", "Europe/Berlin");
   const v = new FakeVikunja();
   const listOpenTasks = async (projectId: number) => (await openTasks(v, projectId, 2)).tasks;
   const anonymizer = new Anonymizer(parseDictionary(DICT), store);
   const agent = new Agent({
-    model, modelName: "test/model", tools: createTools(v, 1, (t) => anonymizer.variants(t)), anonymizer, listOpenTasks,
+    model, task: TASK, tools: createTools(v, { inboxProjectId: 1, variants: (t) => anonymizer.variants(t) }), anonymizer, listOpenTasks,
     store, limits: { ...LIMITS, ...limits }, timeZone: "Europe/Berlin", now: () => NOW, ...(research ? { research } : {}), ...(letters ? { letters } : {}),
   });
   return { store, v, agent };
@@ -544,7 +545,7 @@ describe("0.8.1 fixes", () => {
 });
 
 describe("letters rooms", () => {
-  const LETTERS: ResearchProfile = { modelName: "test/writer", maxSteps: 3, maxTokens: 3000, maxCostPerRequest: 0.25, maxSearches: 0 };
+  const LETTERS: ModelProfile = { modelName: "test/writer", maxSteps: 3, maxTokens: 3000, maxCostPerRequest: 0.25, maxSearches: 0 };
 
   it("drafts with the letters model and instructions, names restored, no web search", async () => {
     const model = new ScriptedModel([

@@ -42,10 +42,13 @@ export interface VikunjaApi {
   updateTask(id: number, changes: TaskChanges): Promise<Task>;
 }
 
+const REQUEST_TIMEOUT_MS = 15_000;
+
+/** An HTTP error from Vikunja, or (status 0) no answer at all. */
 export class VikunjaError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
-    super(message);
+  constructor(message: string, status: number, options?: ErrorOptions) {
+    super(message, options);
     this.name = "VikunjaError";
     this.status = status;
   }
@@ -73,21 +76,28 @@ export class Vikunja implements VikunjaApi {
     this.#fetch = fetchImpl;
   }
 
+  /** fetch itself failing (connection refused, DNS, the timeout) is a VikunjaError too, with status 0, so a tool call
+   * gets an error result the model can tell the user about instead of the whole request failing. */
+  async #fetchOrFail(path: string, init: RequestInit): Promise<Response> {
+    try {
+      return await this.#fetch(this.#base + path, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    } catch (e) {
+      const timedOut = e instanceof Error && e.name === "TimeoutError";
+      throw new VikunjaError(timedOut ? `Vikunja did not answer within ${REQUEST_TIMEOUT_MS / 1000} s` : "Vikunja is unreachable", 0, { cause: e });
+    }
+  }
+
   async #request<T>(method: string, path: string, body?: unknown, retryAuthCheck = true): Promise<T> {
-    const res = await this.#fetch(this.#base + path, {
+    const res = await this.#fetchOrFail(path, {
       method,
       headers: { Authorization: `Bearer ${this.#token}`, ...(body ? { "Content-Type": "application/json" } : {}) },
       body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(15_000),
     });
     if (res.ok) return (await res.json()) as T;
     // Vikunja answers 401 both for a dead token and for an endpoint the token has no permission for.
     // Tell them apart with an endpoint the token is always allowed to use.
     if (res.status === 401 && retryAuthCheck) {
-      const probe = await this.#fetch(this.#base + "/projects?per_page=1", {
-        headers: { Authorization: `Bearer ${this.#token}` },
-        signal: AbortSignal.timeout(15_000),
-      });
+      const probe = await this.#fetchOrFail("/projects?per_page=1", { headers: { Authorization: `Bearer ${this.#token}` } });
       if (probe.status === 401) throw new VikunjaAuthError();
       throw new VikunjaError(`Vikunja token has no permission for ${method} ${path.split("?")[0]}`, 403);
     }

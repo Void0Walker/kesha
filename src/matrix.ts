@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { MatrixClient, RustSdkCryptoStorageProvider, SimpleFsStorageProvider } from "matrix-bot-sdk";
-import type { Agent } from "./agent.ts";
-import { notifyRoom, roomMode, roomProject, runCommand, type NotifyKind } from "./commands.ts";
+import type { Mode, TurnResult } from "./agent.ts";
+import { notifyRoom, roomMode, roomProject, runCommand, type NotifyKind, type RoomProject } from "./commands.ts";
 import { currentConversation, inResearch, setResearch } from "./conversation.ts";
 import { ErrorReporter } from "./errors.ts";
 import { replyContent, type FormatOptions, type MatrixText } from "./format.ts";
@@ -9,11 +9,12 @@ import { ModelTimeoutError } from "./llm.ts";
 import type { Store } from "./store.ts";
 import { VikunjaAuthError, type VikunjaApi } from "./vikunja.ts";
 
-// After a fresh start (empty sync store) the first sync replays recent room history. Anything older than this
-// before startup is not answered again; messages sent during a short restart still are
+// After a fresh start (empty sync store) the first sync replays recent room history, and after a longer outage the
+// server delivers what was sent meanwhile. Anything older than this before startup is not answered; the room gets one
+// notice saying so. Messages sent during a short restart are still answered
 const REPLAY_WINDOW_MS = 5 * 60_000;
 
-interface MessageEvent {
+export interface MessageEvent {
   event_id: string;
   sender: string;
   origin_server_ts: number;
@@ -24,12 +25,37 @@ interface MessageEvent {
   };
 }
 
+/** What the bot uses of matrix-bot-sdk's MatrixClient. Tests pass a fake. */
+export interface BotClient {
+  on(event: "room.invite", handler: (roomId: string, ev: { sender: string }) => Promise<void>): unknown;
+  on(event: "room.message", handler: (roomId: string, ev: MessageEvent) => void): unknown;
+  on(event: "room.failed_decryption", handler: (roomId: string, ev: unknown, e: Error) => void): unknown;
+  getUserId(): Promise<string>;
+  start(): Promise<unknown>;
+  stop(): void;
+  joinRoom(roomId: string): Promise<unknown>;
+  leaveRoom(roomId: string): Promise<unknown>;
+  sendMessage(roomId: string, content: object): Promise<string>;
+  setTyping(roomId: string, typing: boolean, timeoutMs?: number): Promise<unknown>;
+  crypto: { isRoomEncrypted(roomId: string): Promise<boolean> };
+}
+
+/** What the bot needs from the Agent. */
+export interface TurnAgent {
+  turn(conversation: string, room: string, text: string, mode: Mode, project?: RoomProject): Promise<TurnResult>;
+  spentToday(): number;
+  readonly dailyCap: number;
+  readonly researchEnabled: boolean;
+}
+
 export interface BotOptions {
   homeserverUrl: string;
   accessToken: string;
   allowedUsers: string[];
   dataDir: string;
-  agent: Agent;
+  // Tests: a fake instead of a MatrixClient built from the options above
+  client?: BotClient;
+  agent: TurnAgent;
   store: Store;
   vikunja: VikunjaApi;
   timeZone: string;
@@ -43,11 +69,13 @@ export interface BotOptions {
 type Relation = { rel_type?: string; event_id?: string };
 
 export class Bot {
-  readonly client: MatrixClient;
+  readonly client: BotClient;
   readonly #o: BotOptions;
   // A room is one conversation: its messages are handled strictly in arrival order, one at a time
   readonly #queues = new Map<string, Promise<void>>();
   readonly #errors: ErrorReporter;
+  // Rooms told, this start, that messages from before the replay window were skipped
+  readonly #skippedNoticed = new Set<string>();
   #vikunjaDown = false;
   #startedAt = 0;
   #userId = "";
@@ -61,7 +89,7 @@ export class Bot {
       return true;
     });
     // The crypto store belongs to the device of the access token. A new token needs an empty crypto directory
-    this.client = new MatrixClient(
+    this.client = o.client ?? new MatrixClient(
       o.homeserverUrl,
       o.accessToken,
       new SimpleFsStorageProvider(join(o.dataDir, "matrix-sync.json")),
@@ -86,8 +114,16 @@ export class Bot {
     console.log(`matrix: running as ${this.#userId}`);
   }
 
+  /** Stops syncing: no new messages are taken. Requests already running go on, see drain. */
   stop(): void {
     this.client.stop();
+  }
+
+  /** Waits until every room's queue is empty, at most timeoutMs. Returns how many rooms still had a request running. */
+  async drain(timeoutMs: number): Promise<number> {
+    const done = Promise.allSettled(this.#queues.values()).then(() => 0);
+    const late = new Promise<number>((resolve) => setTimeout(() => resolve(this.#queues.size), timeoutMs).unref());
+    return Promise.race([done, late]);
   }
 
   /** Message to the user outside a conversation (token expiry, Vikunja down, new version): goes to the room set for
@@ -119,7 +155,10 @@ export class Bot {
     if (!body || ev.content?.msgtype !== "m.text") return;
     if (ev.sender === this.#userId || !this.#o.allowedUsers.includes(ev.sender)) return;
     if (relation?.rel_type === "m.replace") return;
-    if (ev.origin_server_ts < this.#startedAt - REPLAY_WINDOW_MS) return;
+    if (ev.origin_server_ts < this.#startedAt - REPLAY_WINDOW_MS) {
+      this.#noticeSkipped(roomId);
+      return;
+    }
 
     const run = (this.#queues.get(roomId) ?? Promise.resolve())
       .then(() => this.#handle(roomId, ev, body, relation))
@@ -127,6 +166,17 @@ export class Bot {
     this.#queues.set(roomId, run);
     void run.then(() => {
       if (this.#queues.get(roomId) === run) this.#queues.delete(roomId);
+    });
+  }
+
+  // Once per room and start: the user shouldn't wait for answers that never come
+  #noticeSkipped(roomId: string): void {
+    if (this.#skippedNoticed.has(roomId)) return;
+    this.#skippedNoticed.add(roomId);
+    const since = new Date(this.#startedAt - REPLAY_WINDOW_MS).toLocaleString("sv-SE", { timeZone: this.#o.timeZone, dateStyle: "short", timeStyle: "short" });
+    const text = `I was offline for a while, so I'm not answering messages sent before ${since}. Send them again if they still matter.`;
+    void this.client.sendMessage(roomId, replyContent(text, this.#o.format, undefined, undefined, "m.notice")).catch((e: unknown) => {
+      console.warn(`could not send the skipped-messages notice to ${roomId}:`, e);
     });
   }
 

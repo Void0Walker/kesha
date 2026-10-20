@@ -49,6 +49,21 @@ const dateOrNull = (d: string) => (d === NO_DATE || d.startsWith("0001-") ? null
 /** The task's due date, or null when it has none. */
 export const dueOf = (t: Task) => dateOrNull(t.due_date);
 
+/** Marking a repeating task done makes Vikunja reopen it with its dates moved ahead (repeat_after seconds, or a month). */
+export const repeats = (t: Task) => Number(t.repeat_after) > 0 || t.repeat_mode === 1;
+
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+/** "2026-10-10" as noon of that day in timeZone, the time Vikunja itself gives a date picked without one. Without this
+ * a bare date would be UTC midnight: the evening before in the Americas, and a day the model never meant. */
+export function localNoon(day: string, timeZone: string): string {
+  const utcNoon = new Date(`${day}T12:00:00Z`);
+  // "GMT+02:00" → 120. The offset at UTC noon is the day's offset: clock changes happen at night
+  const offset = /GMT([+-])(\d{2}):(\d{2})/.exec(utcNoon.toLocaleString("en-US", { timeZone, timeZoneName: "longOffset" }));
+  const minutes = offset ? (offset[1] === "-" ? -1 : 1) * (Number(offset[2]) * 60 + Number(offset[3])) : 0;
+  return new Date(utcNoon.getTime() - minutes * 60_000).toISOString();
+}
+
 // Default values are left out (not done, priority 0, no due date, no labels): they were ~40% of a task list's tokens.
 // The system prompt tells the model about the defaults
 function summarize(t: Task, withDescription = false) {
@@ -63,6 +78,7 @@ function summarize(t: Task, withDescription = false) {
     ...(t.priority ? { priority: t.priority } : {}),
     project_id: t.project_id,
     ...(labels.length ? { labels } : {}),
+    ...(repeats(t) ? { repeats: true } : {}),
     ...(description ? { description } : {}),
   };
 }
@@ -70,7 +86,7 @@ function summarize(t: Task, withDescription = false) {
 const DueDate = z
   .string()
   .refine((s) => !Number.isNaN(Date.parse(s)), "expected an ISO 8601 date or date-time, e.g. 2026-10-10 or 2026-10-10T18:00:00+02:00")
-  .describe("ISO 8601 date or date-time with offset");
+  .describe("ISO 8601 date-time with offset, or a date alone, which means noon of that day");
 const Priority = z.number().int().min(0).max(5).describe("0 unset, 1 low, 2 medium, 3 high, 4 urgent, 5 do now");
 
 // The fields Kesha can change, as Vikunja stores them (HTML description, ISO due date). What !undo restores
@@ -126,7 +142,16 @@ const tool = <S extends z.ZodType>(t: Tool<S>): Tool => t as unknown as Tool;
 // dictionary entry therefore searches each of its spellings.
 export type SearchVariants = (term: string) => string[];
 
-export function createTools(vikunja: VikunjaApi, inboxProjectId: number, variants: SearchVariants = (t) => [t]): Tool[] {
+export interface ToolOptions {
+  // Where tasks go when the model names no project
+  inboxProjectId: number;
+  variants?: SearchVariants;
+  // A due date given without a time is noon of that day here
+  timeZone?: string;
+}
+
+export function createTools(vikunja: VikunjaApi, o: ToolOptions): Tool[] {
+  const { inboxProjectId, variants = (t) => [t], timeZone = "UTC" } = o;
   const readable = async (id: number) => {
     const task = await vikunja.getTask(id);
     if (isPrivate(task)) throw privateRefusal(id);
@@ -153,7 +178,9 @@ export function createTools(vikunja: VikunjaApi, inboxProjectId: number, variant
     if (a.title !== undefined) c.title = a.title;
     if (a.description !== undefined) c.description = textToHtml(a.description);
     if (a.done !== undefined) c.done = a.done;
-    if (a.due_date !== undefined) c.due_date = a.due_date === null ? NO_DATE : new Date(a.due_date).toISOString();
+    if (a.due_date !== undefined) {
+      c.due_date = a.due_date === null ? NO_DATE : DATE_ONLY.test(a.due_date) ? localNoon(a.due_date, timeZone) : new Date(a.due_date).toISOString();
+    }
     if (a.priority !== undefined) c.priority = a.priority;
     if (a.project_id !== undefined) c.project_id = a.project_id;
     return c;
@@ -243,7 +270,14 @@ export function createTools(vikunja: VikunjaApi, inboxProjectId: number, variant
         const updated = await vikunja.updateTask(id, changes);
         // Recorded before verify: a write that verify rejects may still have changed something
         ctx.recordChange?.({ taskId: id, kind: "update", before: editableFields(before), after: editableFields(updated) });
-        return summarize(await verify(id, changes), true);
+        // Done on a repeating task: Vikunja reopens it with the next date. That's the stored result, not a lost write
+        const reopened = changes.done === true && repeats(before);
+        const { done: _done, due_date: _due, ...stays } = changes;
+        const stored = await verify(id, reopened ? stays : changes);
+        return {
+          ...summarize(stored, true),
+          ...(reopened ? { note: "This task repeats: Vikunja marked this occurrence done and reopened it with the next due date." } : {}),
+        };
       },
     }),
   ];

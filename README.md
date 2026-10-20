@@ -27,6 +27,8 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
   footer is small and grey.
 - **Tools:** `list_projects`, `list_tasks`, `get_task`, `create_task`, `update_task`. Arguments are validated
   with zod, invalid ones go back to the model as an error it can fix. There is no delete and no label tool.
+  A due date without a time means noon of that day in `KESHA_TIMEZONE`. Marking a repeating task done is reported as
+  Vikunja handles it: the occurrence is done and the task comes back with the next date.
 - **Writes are verified in code:** after every create or update the task is read back and compared.
   Vikunja's update replaces the whole task, so updates read, merge and send the full task.
 - **Private tasks:** tasks labelled `private` are hidden from lists and refused by `get_task`/`update_task`.
@@ -151,7 +153,7 @@ Environment variables:
 | `KESHA_RESEARCH_REASONING_EFFORT` | `medium` | same for the research model |
 | `KESHA_PII_FILE` | `/config/pii.yml` | the dictionary. Kesha refuses to start without it |
 | `KESHA_DATA_DIR` | `/data` | SQLite and Matrix stores |
-| `KESHA_TIMEZONE` | `Europe/Berlin` | for "tomorrow" and the daily cap |
+| `KESHA_TIMEZONE` | `Europe/Berlin` | for "tomorrow", dates given without a time, and the daily cap |
 | `KESHA_CONVERSATION_IDLE_HOURS` | `3` | a room's conversation starts over after this much silence |
 
 Dictionary format:
@@ -178,6 +180,7 @@ Node 24, TypeScript run directly through Node's type stripping, no build step.
 npm ci
 npm test            # node:test, fictional data only
 npm run typecheck
+npm run lint        # oxlint
 ```
 
 Test fixtures must stay fictional. Real task texts and the real dictionary never go into this repo.

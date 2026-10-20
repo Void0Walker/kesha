@@ -1,6 +1,6 @@
 {
   "name": "kesha",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "private": true,
   "description": "Matrix bot that manages Vikunja tasks through OpenRouter, with PII pseudonymization and hard cost caps",
   "type": "module",
@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node src/main.ts",
     "test": "node --test 'test/**/*.test.ts'",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint"
   },
   "dependencies": {
     "matrix-bot-sdk": "^0.8.0",
@@ -20,6 +21,12 @@
   },
   "devDependencies": {
     "@types/node": "^24.19.1",
+    "oxlint": "^1.89.0",
     "typescript": "^7.0.2"
+  },
+  "overrides": {
+    "request": {
+      "form-data": "^2.5.6"
+    }
   }
 }

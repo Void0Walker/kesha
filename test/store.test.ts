@@ -32,6 +32,16 @@ describe("store", () => {
     }
   });
 
+  it("forgets every state key of a forgotten conversation, and only those", () => {
+    const store = new Store(":memory:", "Europe/Berlin");
+    store.saveHistory("!r:x#1", "!r:x", [], 0);
+    store.saveHistory("!r:x#11", "!r:x", [], Date.now());
+    for (const k of ["snapshot:!r:x#1", "note:!r:x#1", "future-key:!r:x#1", "snapshot:!r:x#11", "conv:!r:x", "announced-version"]) store.setState(k, "v");
+    assert.equal(store.forgetIdleThreads(1000), 1);
+    const left = (store.db.prepare("SELECT key FROM state ORDER BY key").all() as { key: string }[]).map((r) => r.key);
+    assert.deepEqual(left, ["announced-version", "conv:!r:x", "snapshot:!r:x#11"]);
+  });
+
   it("blanks request bodies after the retention time and keeps the costs", () => {
     const store = new Store(":memory:", "Europe/Berlin");
     store.logCall(call, new Date("2026-09-01T10:00:00Z"));

@@ -55,6 +55,11 @@ export class FakeVikunja implements VikunjaApi {
     const current = await this.getTask(id);
     const next = { ...current, ...changes };
     if (this.dropOnUpdate) next[this.dropOnUpdate] = current[this.dropOnUpdate] as never;
+    // Vikunja reopens a repeating task marked done and moves its due date ahead
+    if (changes.done && Number(current.repeat_after) > 0) {
+      next.done = false;
+      next.due_date = new Date(Date.parse(current.due_date) + Number(current.repeat_after) * 1000).toISOString();
+    }
     this.tasks.set(id, next);
     return next;
   }

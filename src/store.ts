@@ -155,13 +155,19 @@ export class Store {
     return ended.length;
   }
 
+  // Everything about one conversation goes at once, including every "<something>:<conversation>" state key (snapshot,
+  // note, research, language, and whatever a later version adds): a key not on a hand-kept list can't survive the forget
   #forget(thread: string): void {
-    this.db.prepare("DELETE FROM mappings WHERE thread = ?").run(thread);
-    this.db.prepare("DELETE FROM threads WHERE thread = ?").run(thread);
-    this.deleteState(`snapshot:${thread}`);
-    this.deleteState(`note:${thread}`);
-    this.deleteState(`research:${thread}`);
-    this.deleteState(`language:${thread}`);
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare("DELETE FROM mappings WHERE thread = ?").run(thread);
+      this.db.prepare("DELETE FROM threads WHERE thread = ?").run(thread);
+      this.db.prepare("DELETE FROM state WHERE key LIKE '%:' || ? ESCAPE '\\'").run(thread.replace(/[\\%_]/g, "\\$&"));
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
   }
 
   recordChange(c: ChangeRow, now = Date.now()): void {

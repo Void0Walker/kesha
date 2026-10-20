@@ -30,7 +30,7 @@ export function describeError(e: unknown): string {
       break;
     }
     const status = (cur as { status?: unknown }).status;
-    lines.push(`${cur.name}: ${cur.message}${typeof status === "number" ? ` (HTTP ${status})` : ""}`);
+    lines.push(`${cur.name}: ${cur.message}${typeof status === "number" && status > 0 ? ` (HTTP ${status})` : ""}`);
     const frames = (cur.stack ?? "").split("\n").filter((l) => /^\s+at /.test(l)).slice(0, MAX_FRAMES);
     lines.push(...frames.map((l) => `  ${l.trim().replace(/file:\/\/\/app\//g, "")}`));
     cur = cur.cause;

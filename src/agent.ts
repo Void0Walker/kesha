@@ -1,45 +1,41 @@
 import { randomUUID } from "node:crypto";
 import { Anonymizer, ProviderRedactionError, rejectProviderRedactions, UnknownPlaceholderError } from "./anonymizer.ts";
 import { detectLanguage, languageNote } from "./language.ts";
-import type { ChatModel, Message, ReasoningEffort } from "./llm.ts";
+import type { ChatModel, Completion, Message, ReasoningEffort } from "./llm.ts";
 import type { RoomProject } from "./commands.ts";
 import type { Store } from "./store.ts";
 import { dueOf, runTool, toolDefinitions, type Tool, type ToolContext } from "./tools.ts";
 import { VikunjaAuthError, type Task } from "./vikunja.ts";
 
-export interface Limits {
-  maxSteps: number;
-  maxTokens: number;
-  maxCostPerRequest: number;
-  alertCost: number;
-  dailyCap: number;
-  // Unset: the task model's default
-  reasoning?: ReasoningEffort;
-}
-
-// Model and per-request caps for a kind of request: !research messages (which may search the web), letter rooms
-export interface ResearchProfile {
+// Model and per-request caps of one kind of request: task messages, !research messages (which may search the web),
+// letter rooms
+export interface ModelProfile {
   modelName: string;
   maxSteps: number;
   maxTokens: number;
   maxCostPerRequest: number;
-  // Web searches per request, over all its model calls
+  // Web searches per request, over all its model calls. 0: no web search
   maxSearches: number;
   // Web pages opened per model call. 0 or unset: none
   maxFetches?: number;
+  // Unset: the model's default
   reasoning?: ReasoningEffort;
 }
 
-export type ModelProfile = ResearchProfile;
+// Shared by every kind of request
+export interface Limits {
+  alertCost: number;
+  dailyCap: number;
+}
 
 // research: one !r message. letters: a room set with !mode letters, for drafting formal letters and emails
 export type Mode = "task" | "research" | "letters";
 
 export interface AgentDeps {
   model: ChatModel;
-  modelName: string;
+  task: ModelProfile;
   // Unset: research is off
-  research?: ResearchProfile;
+  research?: ModelProfile;
   // Unset: letter rooms use the task model with the letter instructions
   letters?: ModelProfile;
   tools: Tool[];
@@ -198,6 +194,29 @@ export function addConversationNote(store: Store, conversation: string, text: st
   store.setState(noteKey(conversation), prev ? `${prev}\n${text}` : text);
 }
 
+// One request in progress: what the model loop and the tool calls share
+interface Turn {
+  thread: string;
+  room: string;
+  run: ModelProfile;
+  project: RoomProject | undefined;
+  system: Message;
+  history: Message[];
+  ctx: ToolContext;
+  // Today's spend before this request
+  spentBefore: number;
+  cost: number;
+  searches: number;
+  fetches: number;
+  sources: Map<string, string | undefined>;
+  changed: boolean;
+}
+
+interface Outcome {
+  reply: string;
+  tokenDead?: boolean;
+}
+
 export class Agent {
   readonly #d: AgentDeps;
   readonly #toolDefs: ReturnType<typeof toolDefinitions>;
@@ -224,6 +243,11 @@ export class Agent {
     return this.#d.now?.() ?? new Date();
   }
 
+  #profile(mode: Mode): ModelProfile {
+    const { task, research, letters } = this.#d;
+    return (mode === "research" ? research : mode === "letters" ? letters : undefined) ?? task;
+  }
+
   // Saving that the snapshot is fresh is left to the end of the turn: a failed turn doesn't store the message carrying it
   async #snapshot(thread: string, project: RoomProject | undefined, stamp: string): Promise<string | undefined> {
     const { store, listOpenTasks, timeZone } = this.#d;
@@ -240,22 +264,33 @@ export class Agent {
     }
   }
 
+  /** This turn's user message: the send time, the pseudonymized text, then what Kesha adds (a note about !undo, the
+   * room snapshot, the language in research). Says which of those it carried, so they're marked stored at the end. */
+  async #userMessage(thread: string, userText: string, mode: Mode, project: RoomProject | undefined, stamp: string) {
+    const { anonymizer, store } = this.#d;
+    let content = `[${stamp}] ${anonymizer.anonymize(thread, userText).text}`;
+    const note = store.getState(noteKey(thread));
+    if (note) content += `\n\n${anonymizer.anonymize(thread, `(Context from Kesha, not from the user: ${note})`).text}`;
+    const snapshot = await this.#snapshot(thread, project, stamp);
+    if (snapshot) content += `\n\n${anonymizer.anonymize(thread, snapshot).text}`;
+    // The research model answered "Look in Czech stores" in Czech despite the rule in the prompt (2026-10-13): the
+    // language, named right after the user's words, is what it follows. A short follow-up keeps the conversation's language
+    if (mode === "research") {
+      const detected = detectLanguage(userText);
+      if (detected) store.setState(languageKey(thread), detected);
+      content += `\n\n${languageNote(detected ?? store.getState(languageKey(thread)))}`;
+    }
+    return { content, hadNote: note !== undefined, hadSnapshot: snapshot !== undefined };
+  }
+
   async turn(thread: string, room: string, userText: string, mode: Mode = "task", project?: RoomProject): Promise<TurnResult> {
-    const { model, anonymizer, store, limits, tools, timeZone, research } = this.#d;
-    if (mode === "research" && !research) {
+    const { anonymizer, store, limits, timeZone } = this.#d;
+    if (mode === "research" && !this.#d.research) {
       return { reply: "Research is not set up: KESHA_RESEARCH_MODEL is empty.", cost: 0, searches: 0 };
     }
-    const profile = mode === "research" ? research : mode === "letters" ? this.#d.letters : undefined;
-    const run = profile
-      ? profile
-      : {
-          modelName: this.#d.modelName, maxSteps: limits.maxSteps, maxTokens: limits.maxTokens, maxCostPerRequest: limits.maxCostPerRequest,
-          maxSearches: 0, maxFetches: 0, ...(limits.reasoning ? { reasoning: limits.reasoning } : {}),
-        };
-
-    const spent = this.spentToday();
-    if (spent >= limits.dailyCap) {
-      return { reply: `Today's budget is used up (${credits(spent)} of ${credits(limits.dailyCap)}). I'm back tomorrow.`, cost: 0, searches: 0 };
+    const spentBefore = this.spentToday();
+    if (spentBefore >= limits.dailyCap) {
+      return { reply: `Today's budget is used up (${credits(spentBefore)} of ${credits(limits.dailyCap)}). I'm back tomorrow.`, cost: 0, searches: 0 };
     }
 
     const now = this.#now();
@@ -264,118 +299,122 @@ export class Agent {
     store.saveHistory(thread, room, history, now.getTime());
     // The time goes on after pseudonymizing: it holds no PII, and the phone/card patterns must not see it
     const stamp = sentAt(now, timeZone);
-    let content = `[${stamp}] ${anonymizer.anonymize(thread, userText).text}`;
-    const note = store.getState(noteKey(thread));
-    if (note) content += `\n\n${anonymizer.anonymize(thread, `(Context from Kesha, not from the user: ${note})`).text}`;
-    const snapshot = await this.#snapshot(thread, project, stamp);
-    if (snapshot) content += `\n\n${anonymizer.anonymize(thread, snapshot).text}`;
-    // The research model answered "Look in Czech stores" in Czech despite the rule above (2026-10-13): the language,
-    // named right after the user's words, is what it follows. A short follow-up keeps the conversation's language
-    if (mode === "research") {
-      const detected = detectLanguage(userText);
-      if (detected) store.setState(languageKey(thread), detected);
-      content += `\n\n${languageNote(detected ?? store.getState(languageKey(thread)))}`;
-    }
+    const { content, hadNote, hadSnapshot } = await this.#userMessage(thread, userText, mode, project, stamp);
     history.push({ role: "user", content });
     const promptProject = project && { id: project.id, title: anonymizer.anonymize(thread, project.title).text };
-    // Built once per turn: identical bytes in every call keep the prompt cache warm
-    const system: Message = { role: "system", content: systemPrompt(mode, promptProject) };
-    const sessionId = store.sessionId(thread);
     // Everything this request changes is recorded under one id, so !undo reverts the request as a whole
     const turnId = randomUUID();
-    let changed = false;
-    const ctx: ToolContext = {
-      recordChange: (c) => {
-        changed = true;
-        store.recordChange({ room, turnId, taskId: c.taskId, kind: c.kind, ...(c.before ? { before: c.before } : {}), after: c.after });
+    const t: Turn = {
+      thread, room, run: this.#profile(mode), project, history,
+      // Built once per turn: identical bytes in every call keep the prompt cache warm
+      system: { role: "system", content: systemPrompt(mode, promptProject) },
+      ctx: {
+        recordChange: (c) => {
+          t.changed = true;
+          store.recordChange({ room, turnId, taskId: c.taskId, kind: c.kind, ...(c.before ? { before: c.before } : {}), after: c.after });
+        },
       },
+      spentBefore, cost: 0, searches: 0, fetches: 0, sources: new Map(), changed: false,
     };
 
-    let cost = 0;
-    let searches = 0;
-    let fetches = 0;
-    const sources = new Map<string, string | undefined>();
-    const finish = (reply: string, extra: Partial<TurnResult> = {}): TurnResult => ({
-      reply, cost, searches, ...(cost > 0 ? { footer: costFooter(cost, searches, spent + cost, limits.dailyCap, fetches) } : {}), ...extra,
-    });
-    let reply: string | undefined;
-    let tokenDead = false;
-    steps: for (let step = 0; step < run.maxSteps; step++) {
-      if (cost >= run.maxCostPerRequest) {
-        reply = `I stopped: this request reached the cost limit of ${credits(run.maxCostPerRequest)} before I was done.`;
-        break;
-      }
-      if (spent + cost >= limits.dailyCap) {
-        reply = `I stopped: today's budget of ${credits(limits.dailyCap)} is used up.`;
-        break;
-      }
+    const { reply, tokenDead } = await this.#runSteps(t);
 
-      const messages: Message[] = [system, ...history];
-      const searchesLeft = run.maxSearches - searches;
-      const res = await model.complete({
-        model: run.modelName, messages, tools: this.#toolDefs, maxTokens: run.maxTokens, sessionId,
-        ...(searchesLeft > 0 ? { webSearch: { maxSearches: searchesLeft } } : {}),
-        ...(searchesLeft > 0 && run.maxFetches ? { webFetch: { maxFetches: run.maxFetches } } : {}),
-        ...(run.reasoning ? { reasoning: run.reasoning } : {}),
-      });
-      cost += res.cost;
-      searches += res.searches;
-      fetches += res.fetches;
-      for (const c of res.citations) if (!sources.has(c.url)) sources.set(c.url, c.title);
-      store.logCall({
-        thread, room, model: res.model, promptTokens: res.promptTokens, completionTokens: res.completionTokens, cost: res.cost,
-        searches: res.searches, cachedTokens: res.cachedTokens, reasoningTokens: res.reasoningTokens,
-        request: { model: run.modelName, messages }, response: res.message,
-      }, this.#now());
-      history.push(res.message);
-
-      const calls = res.message.tool_calls ?? [];
-      if (!calls.length) {
-        const text = typeof res.message.content === "string" ? res.message.content.trim() : "";
-        // An empty reply would be stored as an empty assistant message, which providers reject on the next call
-        if (!text) history.pop();
-        reply = text ? anonymizer.deanonymize(thread, text) : NO_ANSWER;
-        break;
-      }
-
-      for (const call of calls) {
-        if (call.type !== "function") continue;
-        let result: unknown;
-        try {
-          const args = anonymizer.deanonymizeValueStrict(thread, JSON.parse(call.function.arguments || "{}"));
-          rejectProviderRedactions(args);
-          // In a room with a default project, new tasks go there unless the model named one
-          if (project && call.function.name === "create_task" && args && typeof args === "object" && !("project_id" in args)) {
-            (args as Record<string, unknown>).project_id = project.id;
-          }
-          result = (await runTool(tools, call.function.name, args, ctx)).result;
-        } catch (e) {
-          if (e instanceof VikunjaAuthError) {
-            // Earlier calls of this request may already have written: say so instead of "nothing changed"
-            reply = "Vikunja rejected my token: it expired or was revoked. Rotate it (README, \"Rotating the Kesha Vikunja token\"). " +
-              (changed ? "Changes I made earlier in this request were saved, check them in Vikunja." : "Nothing was changed.");
-            tokenDead = true;
-            break steps;
-          }
-          if (e instanceof SyntaxError) result = { error: "arguments are not valid JSON" };
-          else if (e instanceof UnknownPlaceholderError || e instanceof ProviderRedactionError) result = { error: e.message };
-          else throw e;
-        }
-        history.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(anonymizer.anonymizeValue(thread, result)) });
-      }
-    }
-
-    if (reply === undefined) reply = `I stopped after ${run.maxSteps} steps without finishing. Try a narrower request.`;
     if (history.at(-1)?.role !== "assistant") history.push({ role: "assistant", content: anonymizer.anonymize(thread, reply).text });
     store.saveHistory(thread, room, trimHistory(compactHistory(history)), this.#now().getTime());
     // Only now is the message carrying the snapshot and the note stored
-    if (snapshot) store.setState(snapshotKey(thread), JSON.stringify({ at: now.getTime() }));
-    if (note) store.deleteState(noteKey(thread));
-    if (changed) markSnapshotStale(store, thread);
+    if (hadSnapshot) store.setState(snapshotKey(thread), JSON.stringify({ at: now.getTime() }));
+    if (hadNote) store.deleteState(noteKey(thread));
+    if (t.changed) markSnapshotStale(store, thread);
 
-    const alert = cost >= limits.alertCost
-      ? `This request cost ${credits(cost)}, above the alert threshold of ${credits(limits.alertCost)}.`
+    const alert = t.cost >= limits.alertCost
+      ? `This request cost ${credits(t.cost)}, above the alert threshold of ${credits(limits.alertCost)}.`
       : undefined;
-    return finish(reply + sourceList(sources), { changed, ...(alert ? { alert } : {}), ...(tokenDead ? { tokenDead } : {}) });
+    return {
+      reply: reply + sourceList(t.sources), cost: t.cost, searches: t.searches, changed: t.changed,
+      ...(t.cost > 0 ? { footer: costFooter(t.cost, t.searches, spentBefore + t.cost, limits.dailyCap, t.fetches) } : {}),
+      ...(alert ? { alert } : {}),
+      ...(tokenDead ? { tokenDead } : {}),
+    };
+  }
+
+  /** The model loop: call, run the tools it asks for, call again, until it answers in text or a cap stops it. */
+  async #runSteps(t: Turn): Promise<Outcome> {
+    const { anonymizer, limits } = this.#d;
+    for (let step = 0; step < t.run.maxSteps; step++) {
+      if (t.cost >= t.run.maxCostPerRequest) {
+        return { reply: `I stopped: this request reached the cost limit of ${credits(t.run.maxCostPerRequest)} before I was done.` };
+      }
+      if (t.spentBefore + t.cost >= limits.dailyCap) return { reply: `I stopped: today's budget of ${credits(limits.dailyCap)} is used up.` };
+
+      const message = await this.#call(t);
+      const calls = message.tool_calls ?? [];
+      if (!calls.length) {
+        const text = typeof message.content === "string" ? message.content.trim() : "";
+        // An empty reply would be stored as an empty assistant message, which providers reject on the next call
+        if (!text) t.history.pop();
+        return { reply: text ? anonymizer.deanonymize(t.thread, text) : NO_ANSWER };
+      }
+      const stopped = await this.#runToolCalls(t, calls);
+      if (stopped) return stopped;
+    }
+    return { reply: `I stopped after ${t.run.maxSteps} steps without finishing. Try a narrower request.` };
+  }
+
+  /** One model call: counts its cost, searches and sources, logs it, and appends its message to the history. */
+  async #call(t: Turn): Promise<Completion["message"]> {
+    const { model, store } = this.#d;
+    const { run } = t;
+    const messages: Message[] = [t.system, ...t.history];
+    const searchesLeft = run.maxSearches - t.searches;
+    const res = await model.complete({
+      model: run.modelName, messages, tools: this.#toolDefs, maxTokens: run.maxTokens, sessionId: store.sessionId(t.thread),
+      ...(searchesLeft > 0 ? { webSearch: { maxSearches: searchesLeft } } : {}),
+      ...(searchesLeft > 0 && run.maxFetches ? { webFetch: { maxFetches: run.maxFetches } } : {}),
+      ...(run.reasoning ? { reasoning: run.reasoning } : {}),
+    });
+    t.cost += res.cost;
+    t.searches += res.searches;
+    t.fetches += res.fetches;
+    for (const c of res.citations) if (!t.sources.has(c.url)) t.sources.set(c.url, c.title);
+    store.logCall({
+      thread: t.thread, room: t.room, model: res.model, promptTokens: res.promptTokens, completionTokens: res.completionTokens, cost: res.cost,
+      searches: res.searches, cachedTokens: res.cachedTokens, reasoningTokens: res.reasoningTokens,
+      request: { model: run.modelName, messages }, response: res.message,
+    }, this.#now());
+    t.history.push(res.message);
+    return res.message;
+  }
+
+  /** Runs the tool calls of one model message, their results going into the history pseudonymized. Returns an outcome
+   * only when the request has to end here: Vikunja rejected the token. */
+  async #runToolCalls(t: Turn, calls: NonNullable<Completion["message"]["tool_calls"]>): Promise<Outcome | undefined> {
+    const { anonymizer, tools } = this.#d;
+    for (const call of calls) {
+      if (call.type !== "function") continue;
+      let result: unknown;
+      try {
+        const args = anonymizer.deanonymizeValueStrict(t.thread, JSON.parse(call.function.arguments || "{}"));
+        rejectProviderRedactions(args);
+        // In a room with a default project, new tasks go there unless the model named one
+        if (t.project && call.function.name === "create_task" && args && typeof args === "object" && !("project_id" in args)) {
+          (args as Record<string, unknown>).project_id = t.project.id;
+        }
+        result = (await runTool(tools, call.function.name, args, t.ctx)).result;
+      } catch (e) {
+        if (e instanceof VikunjaAuthError) {
+          // Earlier calls of this request may already have written: say so instead of "nothing changed"
+          return {
+            reply: "Vikunja rejected my token: it expired or was revoked. Rotate it (README, \"Rotating the Kesha Vikunja token\"). " +
+              (t.changed ? "Changes I made earlier in this request were saved, check them in Vikunja." : "Nothing was changed."),
+            tokenDead: true,
+          };
+        }
+        if (e instanceof SyntaxError) result = { error: "arguments are not valid JSON" };
+        else if (e instanceof UnknownPlaceholderError || e instanceof ProviderRedactionError) result = { error: e.message };
+        else throw e;
+      }
+      t.history.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(anonymizer.anonymizeValue(t.thread, result)) });
+    }
+    return undefined;
   }
 }
