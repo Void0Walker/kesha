@@ -109,7 +109,7 @@ you (Element) ──E2EE──▶ Matrix ──▶ kesha ──pseudonymized─�
   Request bodies in the call log are blanked after 30 days, costs stay.
 
 Commands in a chat, answered without the model and free: `!help`, `!today`, `!week`, `!open`, `!undo`, `!new`,
-`!project [name|none]`, `!mode [letters|tasks]`, `!notify-here`, `!releases-here`, `!errors-here [off]`, `!cost`, `!cost week`. And `!research <question>` / `!r <question>`, which switch to the research model.
+`!project [name|none]`, `!mode [letters|tasks]`, `!notify-here`, `!releases-here`, `!errors-here [off]`, `!cost` (this month), `!cost week`, `!cost today`. And `!research <question>` / `!r <question>`, which switch to the research model.
 
 ## Configuration
 

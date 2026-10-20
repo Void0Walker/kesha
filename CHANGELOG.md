@@ -2,6 +2,10 @@
 
 Kesha posts the section of a new version to the chat once it runs. Keep entries short and written for the user.
 
+## 1.5.0
+
+- `!cost` shows what this month has cost so far, with the daily average. `!cost today` is the old answer, today against the daily cap; `!cost week` is unchanged.
+
 ## 1.4.0
 
 - Research answers in the language you wrote in, also when you ask me to look in Czech shops. Before, "look in Czech stores" got a Czech answer.

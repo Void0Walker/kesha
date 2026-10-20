@@ -51,7 +51,7 @@ export function help(idleHours: number): string {
     "- `!notify-here`: reminders and warnings go to this room",
     "- `!releases-here`: release notes go to this room",
     "- `!errors-here`: details of my errors go to this room, `!errors-here off` stops them",
-    "- `!cost`: today's spend, `!cost week`: the last 7 days",
+    "- `!cost`: this month so far, `!cost week`: the last 7 days, `!cost today`: today against the daily cap",
     "- `!help`: this list",
   ].join("\n");
 }
@@ -87,7 +87,9 @@ export async function runCommand(d: CommandDeps, room: string, body: string): Pr
       d.newConversation();
       return "New conversation: I've forgotten what we talked about in this room before.";
     case "cost":
-      return /^week$/i.test(arg) ? costWeek(d, room) : `Spent today: $${d.spentToday().toFixed(4)} of $${d.dailyCap.toFixed(2)}`;
+      if (/^today$/i.test(arg)) return `Spent today: $${d.spentToday().toFixed(4)} of $${d.dailyCap.toFixed(2)}`;
+      if (/^week$/i.test(arg)) return costWeek(d, room);
+      return costMonth(d, room);
     case "today":
     case "week":
     case "open":
@@ -187,6 +189,20 @@ function costWeek(d: CommandDeps, room: string): string {
   return [
     `Last 7 days: $${total.toFixed(4)}, this room $${inRoom.toFixed(4)}.`,
     ...lines,
+    `${Math.round(r.cachedShare * 100)}% of prompt tokens came from the cache.`,
+  ].join("\n");
+}
+
+/** The running calendar month, from its 1st to today, as totals: a day-by-day list would be up to 31 lines. */
+function costMonth(d: CommandDeps, room: string): string {
+  const today = d.store.today(d.now());
+  const dayOfMonth = Number(today.slice(8, 10));
+  const r = d.store.costReport(room, dayOfMonth, d.now());
+  const total = r.days.reduce((n, x) => n + x.total, 0);
+  const inRoom = r.days.reduce((n, x) => n + x.room, 0);
+  const month = new Date(`${today}T12:00:00Z`).toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
+  return [
+    `${month} so far (${dayOfMonth} ${dayOfMonth === 1 ? "day" : "days"}): $${total.toFixed(4)}, this room $${inRoom.toFixed(4)}, $${(total / dayOfMonth).toFixed(4)} per day on average.`,
     `${Math.round(r.cachedShare * 100)}% of prompt tokens came from the cache.`,
   ].join("\n");
 }

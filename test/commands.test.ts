@@ -55,7 +55,7 @@ describe("commands", () => {
 
   it("shows today's spend", async () => {
     const { run } = setup();
-    assert.equal(await run("!cost"), "Spent today: $0.1234 of $1.00");
+    assert.equal(await run("!cost today"), "Spent today: $0.1234 of $1.00");
   });
 
   it("sets a room's project by exact name, then by unique part of it", async () => {
@@ -157,6 +157,28 @@ describe("!cost week", () => {
     assert.match(out, /- Sun 11 Oct: \$0\.0100 \(this room \$0\.0100\)/);
     assert.match(out, /- Sat 10 Oct: \$0\.0200\n/);
     assert.match(out, /50% of prompt tokens came from the cache\.$/);
+  });
+});
+
+describe("!cost month", () => {
+  it("sums the calendar month so far, for all rooms and this room, with the daily average", async () => {
+    const { store, run } = setup();
+    const log = (room: string | undefined, cost: number, ts: string) =>
+      store.logCall({ thread: "t", ...(room ? { room } : {}), model: "m", promptTokens: 1000, completionTokens: 10, cachedTokens: 250, cost, request: {}, response: {} }, new Date(ts));
+    log("!a", 0.01, "2026-10-11T07:00:00Z");
+    log("!b", 0.02, "2026-10-02T07:00:00Z");
+    log(undefined, 0.08, "2026-10-01T07:00:00Z"); // the 1st counts
+    log("!a", 0.40, "2026-09-30T21:00:00Z"); // 23:00 in Berlin on 30 Sep: last month
+    const out = (await run("!cost"))!;
+    assert.equal(out, "October 2026 so far (11 days): $0.1100, this room $0.0100, $0.0100 per day on average.\n25% of prompt tokens came from the cache.");
+  });
+
+  it("on the 1st it covers one day", async () => {
+    const { store, deps } = setup();
+    store.logCall({ thread: "t", room: "!a", model: "m", promptTokens: 1, completionTokens: 1, cost: 0.05, request: {}, response: {} }, new Date("2026-11-01T08:00:00Z"));
+    store.logCall({ thread: "t", room: "!a", model: "m", promptTokens: 1, completionTokens: 1, cost: 0.70, request: {}, response: {} }, new Date("2026-10-31T08:00:00Z"));
+    const first = { ...deps, now: () => new Date("2026-11-01T10:00:00Z") };
+    assert.match((await runCommand(first, "!a", "!cost month"))!, /^November 2026 so far \(1 day\): \$0\.0500, this room \$0\.0500, \$0\.0500 per day/);
   });
 });
 
