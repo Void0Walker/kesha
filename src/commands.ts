@@ -53,6 +53,8 @@ export function help(idleHours: number): string {
     "- `!errors-here`: details of my errors go to this room, `!errors-here off` stops them",
     "- `!cost`: this month so far, `!cost week`: the last 7 days, `!cost today`: today against the daily cap",
     "- `!help`: this list",
+    "",
+    "Voice messages work too: I write down what I heard and answer it. Say \"command\" and a name for a command: \"command today\", \"command research ...\", \"command cost week\".",
   ].join("\n");
 }
 

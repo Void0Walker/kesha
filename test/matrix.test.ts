@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { TurnResult } from "../src/agent.ts";
-import { Bot, type BotClient, type MessageEvent, type TurnAgent } from "../src/matrix.ts";
+import { Bot, type BotClient, type EncryptedFile, type MessageEvent, type TurnAgent } from "../src/matrix.ts";
 import { Store } from "../src/store.ts";
+import { TranscribeError, type Transcriber } from "../src/voice.ts";
 import { FakeVikunja } from "./fakes.ts";
 
 const USER = "@jana:example.org";
@@ -17,7 +18,17 @@ class FakeClient implements BotClient {
   readonly joined: string[] = [];
   readonly left: string[] = [];
   stopped = false;
-  crypto = { isRoomEncrypted: async () => true };
+  // What decryptMedia and downloadContent hand out, keyed by mxc URL
+  readonly media = new Map<string, Buffer>();
+  crypto = {
+    isRoomEncrypted: async () => true,
+    decryptMedia: async (file: EncryptedFile) => this.media.get(file.url) ?? Promise.reject(new Error("unknown media")),
+  };
+  async downloadContent(mxcUrl: string) {
+    const data = this.media.get(mxcUrl);
+    if (!data) throw new Error("unknown media");
+    return { data, contentType: "audio/ogg" };
+  }
 
   on(event: string, handler: unknown): unknown {
     if (event === "room.message") this.handlers.message = handler as Handlers["message"];
@@ -54,13 +65,24 @@ class FakeAgent implements TurnAgent {
   spentToday() { return 0; }
 }
 
-async function setup() {
+/** Transcribes by the audio's bytes: the "clip" is its own transcript. */
+class FakeTranscriber implements Transcriber {
+  readonly calls: Buffer[] = [];
+  async transcribe(audio: Buffer) {
+    this.calls.push(audio);
+    const text = audio.toString("utf8");
+    if (text === "boom") throw new TranscribeError("transcription service unreachable");
+    return { text, seconds: 2 };
+  }
+}
+
+async function setup(o: { transcriber?: Transcriber } = {}) {
   const client = new FakeClient();
   const agent = new FakeAgent();
   const store = new Store(":memory:", "Europe/Berlin");
   const bot = new Bot({
     homeserverUrl: "https://m.example", accessToken: "tk", allowedUsers: [USER], dataDir: "/nonexistent", client, agent, store,
-    vikunja: new FakeVikunja(), timeZone: "Europe/Berlin", version: "1.6.0", changelog: "", idleMs: 3_600_000, format: {},
+    vikunja: new FakeVikunja(), timeZone: "Europe/Berlin", version: "1.6.0", changelog: "", idleMs: 3_600_000, format: {}, ...o,
   });
   await bot.start();
   return { bot, client, agent, store };
@@ -75,6 +97,19 @@ const message = (body: string, o: { sender?: string; ts?: number; msgtype?: stri
 });
 
 const settled = () => new Promise((r) => setTimeout(r, 0));
+
+/** An encrypted voice message whose decrypted bytes are `clip`. */
+function voice(client: FakeClient, clip: string, durationMs = 2000): MessageEvent {
+  const url = `mxc://example.org/${++n}`;
+  client.media.set(url, Buffer.from(clip, "utf8"));
+  return {
+    event_id: `$ev${++n}`, sender: USER, origin_server_ts: Date.now(),
+    content: {
+      msgtype: "m.audio", body: "Voice message", info: { duration: durationMs, mimetype: "audio/ogg" },
+      file: { url, key: { kty: "oct", key_ops: ["encrypt", "decrypt"], alg: "A256CTR", k: "k", ext: true }, iv: "iv", hashes: { sha256: "h" }, v: "v2" },
+    },
+  };
+}
 
 describe("matrix bot", () => {
   it("answers an allowed user in a thread on their message, and ignores everyone else", async () => {
@@ -170,5 +205,53 @@ describe("matrix bot", () => {
     await settled();
     await settled();
     assert.equal(client.bodies().at(-1), "Done: again");
+  });
+
+  describe("voice messages", () => {
+    it("transcribes, shows what it heard, and answers the text like a typed message", async () => {
+      const transcriber = new FakeTranscriber();
+      const { client, agent } = await setup({ transcriber });
+      const ev = voice(client, "Add milk to the shopping list.");
+      client.handlers.message!("!room", ev);
+      await settled();
+      await settled();
+      assert.deepEqual(agent.turns.map((t) => t.text), ["Add milk to the shopping list."]);
+      assert.equal(transcriber.calls.length, 1);
+      assert.equal(client.bodies()[0], '🎙️ Heard: "Add milk to the shopping list."\n\nDone: Add milk to the shopping list.');
+      const relates = client.sent[0]!.content["m.relates_to"] as { "m.in_reply_to": { event_id: string } };
+      assert.equal(relates["m.in_reply_to"].event_id, ev.event_id);
+    });
+
+    it("runs a spoken command without the model, and shows the command it understood", async () => {
+      const { client, agent } = await setup({ transcriber: new FakeTranscriber() });
+      client.handlers.message!("!room", voice(client, "Command today."));
+      await settled();
+      await settled();
+      assert.deepEqual(agent.turns, []);
+      assert.equal(client.bodies()[0], '🎙️ Heard: "Command today." → !today\n\nNothing due today or overdue in all projects.');
+    });
+
+    it("says so when nothing was understood, when the clip is too long, and when the service is down", async () => {
+      const { client, agent } = await setup({ transcriber: new FakeTranscriber() });
+      client.handlers.message!("!room", voice(client, ""));
+      client.handlers.message!("!room", voice(client, "never reached", 11 * 60_000));
+      client.handlers.message!("!room", voice(client, "boom"));
+      await settled();
+      await settled();
+      await settled();
+      assert.deepEqual(agent.turns, []);
+      const bodies = client.bodies();
+      assert.match(bodies[0]!, /couldn't make out any words/);
+      assert.match(bodies[1]!, /longer than 10 minutes/);
+      assert.match(bodies[2]!, /couldn't transcribe that: transcription service unreachable/);
+    });
+
+    it("explains when no transcription service is set up", async () => {
+      const { client, agent } = await setup();
+      client.handlers.message!("!room", voice(client, "hello"));
+      await settled();
+      assert.deepEqual(agent.turns, []);
+      assert.match(client.bodies()[0]!, /no transcription service is set up/);
+    });
   });
 });

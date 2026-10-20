@@ -64,6 +64,8 @@ const Env = z.object({
   KESHA_TIMEZONE: z.string().default("Europe/Berlin"),
   // A room's conversation starts over after this many hours of silence
   KESHA_CONVERSATION_IDLE_HOURS: z.coerce.number().positive().default(3),
+  // The Whistle transcription service (tools repo, stacks/whistle), e.g. http://whistle:8080. Unset: no voice messages
+  KESHA_TRANSCRIBE_URL: z.url().optional(),
 });
 
 export type Config = z.infer<typeof Env>;

@@ -2,6 +2,10 @@
 
 Kesha posts the section of a new version to the chat once it runs. Keep entries short and written for the user.
 
+## 1.7.0
+
+- Voice messages: I write down what I heard and answer it like a typed message. English only for now, so Czech comes out garbled. Say "command" and a command's name to run it by voice: "command today", "command cost week", "command research, what is...". What I heard is shown at the top of my reply, so you can see when I misheard.
+
 ## 1.6.0
 
 - A due date without a time ("on 2026-10-24") is noon of that day in your time zone, not midnight UTC.

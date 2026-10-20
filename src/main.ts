@@ -13,6 +13,7 @@ import { announceRelease } from "./release.ts";
 import { Store } from "./store.ts";
 import { createTools, openTasks } from "./tools.ts";
 import { Vikunja, VikunjaAuthError } from "./vikunja.ts";
+import { WhistleClient } from "./voice.ts";
 
 const IDLE_THREAD_MS = 30 * 86_400_000;
 // Ended conversations (after !new or a quiet period) are never read again: forget them, with their mappings, soon
@@ -56,6 +57,7 @@ try {
 }
 console.log("vikunja: token works");
 console.log(`models: ${config.KESHA_MODEL}, research ${config.KESHA_RESEARCH_MODEL ?? "off"}, letters ${config.KESHA_LETTERS_MODEL ?? config.KESHA_MODEL}`);
+console.log(`voice: ${config.KESHA_TRANSCRIBE_URL ?? "off"}`);
 
 const anonymizer = new Anonymizer(dictionary, store);
 const agent = new Agent({
@@ -114,6 +116,7 @@ const bot = new Bot({
   changelog,
   idleMs: config.KESHA_CONVERSATION_IDLE_HOURS * 3_600_000,
   format: config.VIKUNJA_PUBLIC_URL ? { vikunjaUrl: config.VIKUNJA_PUBLIC_URL } : {},
+  ...(config.KESHA_TRANSCRIBE_URL ? { transcriber: new WhistleClient(config.KESHA_TRANSCRIBE_URL) } : {}),
 });
 await bot.start();
 const lastCrash = store.getState(CRASH_KEY);

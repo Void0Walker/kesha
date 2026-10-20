@@ -8,6 +8,7 @@ import { replyContent, type FormatOptions, type MatrixText } from "./format.ts";
 import { ModelTimeoutError } from "./llm.ts";
 import type { Store } from "./store.ts";
 import { VikunjaAuthError, type VikunjaApi } from "./vikunja.ts";
+import { spokenCommand, TranscribeError, type Transcriber } from "./voice.ts";
 
 // After a fresh start (empty sync store) the first sync replays recent room history, and after a longer outage the
 // server delivers what was sent meanwhile. Anything older than this before startup is not answered; the room gets one
@@ -22,8 +23,24 @@ export interface MessageEvent {
     msgtype?: string;
     body?: string;
     "m.relates_to"?: Relation;
+    // m.audio: the upload, encrypted (file) in encrypted rooms, plain (url) otherwise
+    url?: string;
+    file?: EncryptedFile;
+    info?: { duration?: number; mimetype?: string };
   };
 }
+
+/** The file field of a message in an encrypted room: the mxc URL and the key to decrypt the download. */
+export interface EncryptedFile {
+  url: string;
+  key: { kty: "oct"; key_ops: string[]; alg: "A256CTR"; k: string; ext: true };
+  iv: string;
+  hashes: { sha256: string };
+  v: "v2";
+}
+
+// Voice messages longer than this are refused without downloading them
+const MAX_VOICE_MS = 10 * 60_000;
 
 /** What the bot uses of matrix-bot-sdk's MatrixClient. Tests pass a fake. */
 export interface BotClient {
@@ -37,7 +54,12 @@ export interface BotClient {
   leaveRoom(roomId: string): Promise<unknown>;
   sendMessage(roomId: string, content: object): Promise<string>;
   setTyping(roomId: string, typing: boolean, timeoutMs?: number): Promise<unknown>;
-  crypto: { isRoomEncrypted(roomId: string): Promise<boolean> };
+  downloadContent(mxcUrl: string): Promise<{ data: Buffer; contentType?: string }>;
+  crypto: {
+    isRoomEncrypted(roomId: string): Promise<boolean>;
+    // Downloads and decrypts
+    decryptMedia(file: EncryptedFile): Promise<Buffer>;
+  };
 }
 
 /** What the bot needs from the Agent. */
@@ -56,6 +78,8 @@ export interface BotOptions {
   // Tests: a fake instead of a MatrixClient built from the options above
   client?: BotClient;
   agent: TurnAgent;
+  // Unset: voice messages are answered with a note that there is no transcription
+  transcriber?: Transcriber;
   store: Store;
   vikunja: VikunjaApi;
   timeZone: string;
@@ -150,9 +174,10 @@ export class Bot {
 
   // Synchronous on purpose: the message joins its room's queue before anything else can run
   #enqueue(roomId: string, ev: MessageEvent): void {
-    const body = ev.content?.body?.trim();
     const relation = ev.content?.["m.relates_to"];
-    if (!body || ev.content?.msgtype !== "m.text") return;
+    const voice = ev.content?.msgtype === "m.audio";
+    const body = voice ? "" : ev.content?.body?.trim();
+    if (!voice && (!body || ev.content?.msgtype !== "m.text")) return;
     if (ev.sender === this.#userId || !this.#o.allowedUsers.includes(ev.sender)) return;
     if (relation?.rel_type === "m.replace") return;
     if (ev.origin_server_ts < this.#startedAt - REPLAY_WINDOW_MS) {
@@ -161,7 +186,7 @@ export class Bot {
     }
 
     const run = (this.#queues.get(roomId) ?? Promise.resolve())
-      .then(() => this.#handle(roomId, ev, body, relation))
+      .then(() => (voice ? this.#handleVoice(roomId, ev, relation) : this.#handle(roomId, ev, body!, relation)))
       .catch((e) => this.failed("Message handling failed", e, roomId));
     this.#queues.set(roomId, run);
     void run.then(() => {
@@ -180,17 +205,57 @@ export class Bot {
     });
   }
 
-  async #handle(roomId: string, ev: MessageEvent, body: string, relation: Relation | undefined): Promise<void> {
-    const { agent, store, format, idleMs } = this.#o;
+  /** A voice message: transcribed, shown back ("heard: ..."), then handled like the typed text. */
+  async #handleVoice(roomId: string, ev: MessageEvent, relation: Relation | undefined): Promise<void> {
+    const { transcriber, format } = this.#o;
+    const reply = (text: string) => this.client.sendMessage(roomId, { ...replyContent(text, format), "m.relates_to": this.#relates(ev, relation) });
+    if (!transcriber) {
+      await reply("I can't listen to voice messages: no transcription service is set up (KESHA_TRANSCRIBE_URL).");
+      return;
+    }
+    const c = ev.content ?? {};
+    if ((c.info?.duration ?? 0) > MAX_VOICE_MS) {
+      await reply(`That voice message is longer than ${MAX_VOICE_MS / 60_000} minutes, I only listen to shorter ones.`);
+      return;
+    }
+    // Transcription takes seconds: show typing meanwhile
+    void this.client.setTyping(roomId, true, 30_000).catch(() => {});
+    let text: string;
+    try {
+      const audio = c.file ? await this.client.crypto.decryptMedia(c.file) : c.url ? (await this.client.downloadContent(c.url)).data : undefined;
+      if (!audio) throw new TranscribeError("voice message without a file");
+      text = (await transcriber.transcribe(audio)).text;
+    } catch (e) {
+      void this.failed("Transcription failed", e, roomId);
+      await this.client.setTyping(roomId, false).catch(() => {});
+      await reply(e instanceof TranscribeError ? `I couldn't transcribe that: ${e.message}.` : "I couldn't transcribe that voice message. Details are in my logs.");
+      return;
+    }
+    if (!text) {
+      await this.client.setTyping(roomId, false).catch(() => {});
+      await reply("I couldn't make out any words in that voice message.");
+      return;
+    }
+    await this.#handle(roomId, ev, spokenCommand(text), relation, text);
+  }
+
+  #relates(ev: MessageEvent, relation: Relation | undefined) {
     // Written inside an old thread: answer there so the reply shows next to the question. It still belongs to the
     // room's conversation
     const thread = relation?.rel_type === "m.thread" && relation.event_id ? relation.event_id : undefined;
-    const relates = {
+    return {
       ...(thread ? { rel_type: "m.thread", event_id: thread, is_falling_back: true } : {}),
       "m.in_reply_to": { event_id: ev.event_id },
     };
+  }
+
+  /** heard: the transcript of a voice message, shown at the top of the reply so the user sees what was understood. */
+  async #handle(roomId: string, ev: MessageEvent, body: string, relation: Relation | undefined, heard?: string): Promise<void> {
+    const { agent, store, format, idleMs } = this.#o;
+    const relates = this.#relates(ev, relation);
     const send = (content: MatrixText) => this.client.sendMessage(roomId, { ...content, "m.relates_to": relates });
-    const reply = (text: string) => send(replyContent(text, format));
+    const heardLine = heard ? `🎙️ Heard: "${heard}"${body !== heard ? ` → ${body.split("\n")[0]}` : ""}\n\n` : "";
+    const reply = (text: string) => send(replyContent(heardLine + text, format));
 
     if (!(await this.client.crypto.isRoomEncrypted(roomId))) {
       await reply("I only work in encrypted rooms. Turn on encryption for this room or start an encrypted direct chat.");
@@ -243,7 +308,7 @@ export class Bot {
       const res = await agent.turn(conversation, roomId, text, mode, roomProject(store, roomId));
       if (res.tokenDead) this.#vikunjaDown = true;
       if (research && agent.researchEnabled) setResearch(store, conversation, !res.changed);
-      await send(replyContent(res.reply, format, res.footer, res.alert));
+      await send(replyContent(heardLine + res.reply, format, res.footer, res.alert));
       outcome = `Research done: ${res.searches} ${res.searches === 1 ? "search" : "searches"}, $${res.cost.toFixed(4)}.`;
     } catch (e) {
       void this.failed(research ? "Research failed" : "Request failed", e, roomId);
