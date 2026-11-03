@@ -1,4 +1,4 @@
-FROM node:24.14-bookworm-slim
+FROM node:26.13-bookworm-slim
 
 WORKDIR /app
 ENV NODE_ENV=production
