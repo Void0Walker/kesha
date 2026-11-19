@@ -56,6 +56,7 @@ const COMMANDS: [RegExp, string][] = [
   [/^releases?[- ]here\b/i, "releases-here"],
   [/^errors?[- ]here\b/i, "errors-here"],
   [/^(?:research|r)\b/i, "research"],
+  [/^shop(?:ping)?\b/i, "shop"],
   [/^costs?\b/i, "cost"],
   [/^today\b/i, "today"],
   [/^week\b/i, "week"],
@@ -79,7 +80,7 @@ export function spokenCommand(transcript: string): string {
     const hit = re.exec(rest);
     if (!hit) continue;
     let arg = rest.slice(hit[0].length).replace(/^[\s,:.-]+/, "").trim();
-    if (name !== "research") arg = arg.replace(/[\s.,!?]+$/, "").toLowerCase();
+    if (name !== "research" && name !== "shop") arg = arg.replace(/[\s.,!?]+$/, "").toLowerCase();
     return arg ? `!${name} ${arg}` : `!${name}`;
   }
   const word = /^[\p{L}-]+/u.exec(rest)?.[0] ?? rest;

@@ -57,6 +57,8 @@ const webFetchTool = (maxUses: number) =>
 
 interface Usage {
   cost: number;
+  // Bring your own key: the provider bills its own account, usage.cost is only OpenRouter's fee
+  is_byok?: boolean;
   cost_details?: { upstream_inference_cost?: number };
 }
 
@@ -64,6 +66,13 @@ interface Usage {
  * (searches, fetches) on top of the inference cost, never less than OpenRouter reports, so the caps can only
  * overestimate. */
 export function billedCost(usage: Usage, toolFees: number): number {
+  // With the user's own provider key (e.g. Anthropic credits), the model's price is billed there and only reported as
+  // upstream_inference_cost; usage.cost is OpenRouter's fee on top. Both count against the caps
+  if (usage.is_byok) {
+    const upstream = usage.cost_details?.upstream_inference_cost ?? 0;
+    const total = usage.cost + upstream;
+    return toolFees ? Math.max(total, upstream + toolFees) : total;
+  }
   if (!toolFees) return usage.cost;
   const inference = usage.cost_details?.upstream_inference_cost ?? usage.cost;
   return Math.max(usage.cost, inference + toolFees);
@@ -220,7 +229,7 @@ export class OpenRouter implements ChatModel {
       completionTokens: usage.completion_tokens,
       cachedTokens: usage.prompt_tokens_details?.cached_tokens ?? 0,
       reasoningTokens: usage.completion_tokens_details?.reasoning_tokens ?? 0,
-      cost: billedCost({ cost: usage.cost, ...(usage.cost_details ? { cost_details: usage.cost_details } : {}) },
+      cost: billedCost({ cost: usage.cost, ...(usage.is_byok ? { is_byok: true } : {}), ...(usage.cost_details ? { cost_details: usage.cost_details } : {}) },
         searches * this.#o.searchCost + fetches * FETCH_COST),
       searches,
       fetches,

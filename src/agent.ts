@@ -3,8 +3,10 @@ import { Anonymizer, ProviderRedactionError, rejectProviderRedactions, UnknownPl
 import { detectLanguage, languageNote } from "./language.ts";
 import type { ChatModel, Completion, Message, ReasoningEffort } from "./llm.ts";
 import type { RoomProject } from "./commands.ts";
-import type { Store } from "./store.ts";
-import { dueOf, runTool, toolDefinitions, type Tool, type ToolContext } from "./tools.ts";
+import type { Budget, Store } from "./store.ts";
+import { choicesText, type ProductChoice } from "./choices.ts";
+import { RohlikAuthError } from "./rohlik.ts";
+import { dueOf, htmlToText, runTool, toolDefinitions, type Tool, type ToolContext } from "./tools.ts";
 import { VikunjaAuthError, type Task } from "./vikunja.ts";
 
 // Model and per-request caps of one kind of request: task messages, !research messages (which may search the web),
@@ -26,10 +28,30 @@ export interface ModelProfile {
 export interface Limits {
   alertCost: number;
   dailyCap: number;
+  // Shopping's own daily cap, counted apart from dailyCap. Unset: shopping counts against dailyCap
+  shoppingDailyCap?: number;
 }
 
-// research: one !r message. letters: a room set with !mode letters, for drafting formal letters and emails
-export type Mode = "task" | "research" | "letters";
+// research: one !r message. letters: a room set with !mode letters, for drafting formal letters and emails.
+// shopping: !shop, filling the Rohlík cart from the shopping project
+export type Mode = "task" | "research" | "letters" | "shopping";
+
+// The shopping project's open tasks, given to the model with !shop. Groceries and other tasks mixed
+export interface ShoppingList {
+  project: RoomProject;
+  tasks: Task[];
+  // False when there were more open tasks than fetched
+  complete: boolean;
+  // Products the user chose before, remembered across conversations
+  choices?: ProductChoice[];
+}
+
+export interface Shopping {
+  profile: ModelProfile;
+  // The Rohlík tools, asked from the server each turn. Throws RohlikAuthError without a sign-in
+  tools(): Promise<Tool[]>;
+  list(): Promise<ShoppingList>;
+}
 
 export interface AgentDeps {
   model: ChatModel;
@@ -38,6 +60,8 @@ export interface AgentDeps {
   research?: ModelProfile;
   // Unset: letter rooms use the task model with the letter instructions
   letters?: ModelProfile;
+  // Unset: shopping is off
+  shopping?: Shopping;
   tools: Tool[];
   // Open, non-private tasks of a project, for the room snapshot. Unset: no snapshot
   listOpenTasks?(projectId: number): Promise<Task[]>;
@@ -71,11 +95,11 @@ const MAX_SOURCES = 8;
 
 const credits = (n: number) => `$${n.toFixed(4)}`;
 
-export function costFooter(cost: number, searches: number, spentToday: number, dailyCap: number, fetches = 0): string {
+export function costFooter(cost: number, searches: number, spentToday: number, dailyCap: number, fetches = 0, label = "today"): string {
   const parts = [credits(cost)];
   if (searches) parts.push(`${searches} ${searches === 1 ? "search" : "searches"}`);
   if (fetches) parts.push(`${fetches} ${fetches === 1 ? "page" : "pages"} opened`);
-  parts.push(`today ${credits(spentToday)} of $${dailyCap.toFixed(2)}`);
+  parts.push(`${label} ${credits(spentToday)} of $${dailyCap.toFixed(2)}`);
   return `— ${parts.join(" · ")}`;
 }
 
@@ -116,7 +140,18 @@ export function systemPrompt(mode: Mode, project?: RoomProject): string {
           "Placeholders mean nothing outside this chat: never put them in search queries or URLs. If a question depends on who a placeholder is, search for the general topic.",
           "Lead with the answer, then the key facts. Simple Markdown is fine (**bold**, lists, links); no tables or headings. Sources are listed under your reply automatically, don't repeat them as a list; do link the specific pages you recommend, like products.",
         ]
-      : mode === "letters"
+      : mode === "shopping"
+        ? [
+            "This conversation fills the user's grocery cart at Rohlík.cz, a Czech online grocer, with the Rohlík tools. You can search products and change the cart; you can't place, schedule or pay for an order. The user checks the cart and orders in Rohlík themselves.",
+            "When the user starts shopping, their message carries the open tasks of their shopping project. That project also holds tasks that aren't shopping: take only things to buy (food, drinks, drugstore and household goods), skip the rest, and name the skipped tasks in one line at the end.",
+            "Look at the cart first so you don't add what is already there. Search in Czech, the catalogue is Czech: tasks are often written in Russian or other languages, translate them (\"молоко\" is \"mléko\"). Pick the product that matches the task: kind, size and amount (\"2x\", \"2 kg\", \"6 ks\" or \"6 шт\" in a task is the quantity). Prefer what the tools show the user buys usually, otherwise a common mid-priced product. Add one product per item, never several variants. Search up to four items per call and add all products in one call when you can. Search results start with sponsored products, so choose by how well a product matches, never by its position. Rohlík marks the user's favourites (favourite: true): prefer them.",
+            "If the right choice depends on taste (brand, fat content, size) and the task doesn't say, don't guess: leave that item out and ask at the end with two or three concrete options and prices.",
+            "The list comes with the products the user chose before: use them for matching items, whatever language either is written in (\"вода\" on the list matches a choice for \"voda\"), by product id, without searching. When the user picks one of your options, names a product (\"water is always Magnesia\") or corrects your choice, record it with remember_product_choice under the item as they write it on the list, so next time it is used without asking. Never record your own guesses.",
+            "Placeholders mean nothing to Rohlík: never put them in searches or tool arguments for Rohlík.",
+            "Reply with a short list of what you added (product, quantity, price), then what you couldn't find or need the user to choose, and the cart total if the tools show it. If the cart is below the minimum order value, say how much is missing. End by reminding the user to check the cart and finish the order in Rohlík. Simple Markdown is fine (**bold**, lists, links); no tables or headings.",
+            "Don't mark tasks done or change them unless the user asks. Cart changes can't be undone with !undo; to fix the cart, change it with the tools.",
+          ]
+        : mode === "letters"
         ? [
             "This room is for drafting letters and emails, often to officials, authorities, doctors and other important people. Write the draft in the language the user asks for, by default formal Czech; talk to the user in their language.",
             "Draft: a subject line (\"Předmět: …\"), the greeting, a concise body with one point per paragraph, a closing (\"S pozdravem\" or, to high officials, \"S úctou\"), and the sender's name if the user gave it. Formal \"Vy\" with a capital V to a single person. Polite, clear and specific, no clichés or filler.",
@@ -176,6 +211,24 @@ export function snapshotText(tasks: Task[], at: string, timeZone: string): strin
   return `(Context from Kesha, not from the user: open tasks of this room's project as of ${at}: ${items.length ? items.join("; ") : "none"}${more})`;
 }
 
+// Enough for a long list; titles and descriptions cut, descriptions often say which brand or size
+const SHOPPING_TASKS = 80;
+const SHOPPING_TITLE = 120;
+const SHOPPING_DESCRIPTION = 160;
+
+/** The shopping project's open tasks for the !shop message, oldest first like a list written down over the week. */
+export function shoppingListText(list: ShoppingList, at: string, timeZone: string): string {
+  const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+  const items = [...list.tasks].sort((a, b) => a.id - b.id).slice(0, SHOPPING_TASKS).map((t) => {
+    const description = htmlToText(t.description ?? "").replace(/\s+/g, " ");
+    const due = dueOf(t);
+    return `#${t.id} ${cut(t.title, SHOPPING_TITLE)}${description ? ` (${cut(description, SHOPPING_DESCRIPTION)})` : ""}${due ? ` · due ${new Date(due).toLocaleDateString("sv-SE", { timeZone })}` : ""}`;
+  });
+  const more = list.tasks.length > SHOPPING_TASKS || !list.complete ? "; there are more open tasks than listed" : "";
+  const choices = choicesText(list.choices ?? []);
+  return `(Context from Kesha, not from the user: open tasks of the shopping project "${list.project.title}" (id ${list.project.id}) as of ${at}, not all of them are things to buy: ${items.length ? items.join("; ") : "none"}${more})${choices ? `\n\n${choices}` : ""}`;
+}
+
 const snapshotKey = (conversation: string) => `snapshot:${conversation}`;
 // The language the user last wrote research questions in
 export const languageKey = (conversation: string) => `language:${conversation}`;
@@ -200,6 +253,11 @@ interface Turn {
   room: string;
   run: ModelProfile;
   project: RoomProject | undefined;
+  // Vikunja's tools, and Rohlík's in shopping
+  tools: Tool[];
+  toolDefs: ReturnType<typeof toolDefinitions>;
+  // The daily cap this request counts against
+  daily: { budget: Budget; cap: number; what: string };
   system: Message;
   history: Message[];
   ctx: ToolContext;
@@ -230,13 +288,29 @@ export class Agent {
     return this.#d.research !== undefined;
   }
 
+  get shoppingEnabled(): boolean {
+    return this.#d.shopping !== undefined;
+  }
+
   get dailyCap(): number {
     return this.#d.limits.dailyCap;
   }
 
-  spentToday(): number {
+  /** Set when shopping has a daily cap of its own. */
+  get shoppingDailyCap(): number | undefined {
+    return this.#d.shopping ? this.#d.limits.shoppingDailyCap : undefined;
+  }
+
+  spentToday(budget: Budget = "main"): number {
     const { store } = this.#d;
-    return store.spentOn(store.today(this.#now()));
+    return store.spentOn(store.today(this.#now()), budget);
+  }
+
+  #budget(mode: Mode): { budget: Budget; cap: number; what: string } {
+    const { limits } = this.#d;
+    return mode === "shopping" && limits.shoppingDailyCap !== undefined
+      ? { budget: "shopping", cap: limits.shoppingDailyCap, what: "shopping budget" }
+      : { budget: "main", cap: limits.dailyCap, what: "budget" };
   }
 
   #now(): Date {
@@ -244,8 +318,8 @@ export class Agent {
   }
 
   #profile(mode: Mode): ModelProfile {
-    const { task, research, letters } = this.#d;
-    return (mode === "research" ? research : mode === "letters" ? letters : undefined) ?? task;
+    const { task, research, letters, shopping } = this.#d;
+    return (mode === "research" ? research : mode === "letters" ? letters : mode === "shopping" ? shopping?.profile : undefined) ?? task;
   }
 
   // Saving that the snapshot is fresh is left to the end of the turn: a failed turn doesn't store the message carrying it
@@ -266,16 +340,17 @@ export class Agent {
 
   /** This turn's user message: the send time, the pseudonymized text, then what Kesha adds (a note about !undo, the
    * room snapshot, the language in research). Says which of those it carried, so they're marked stored at the end. */
-  async #userMessage(thread: string, userText: string, mode: Mode, project: RoomProject | undefined, stamp: string) {
-    const { anonymizer, store } = this.#d;
+  async #userMessage(thread: string, userText: string, mode: Mode, project: RoomProject | undefined, stamp: string, shoppingList?: ShoppingList) {
+    const { anonymizer, store, timeZone } = this.#d;
     let content = `[${stamp}] ${anonymizer.anonymize(thread, userText).text}`;
+    if (shoppingList) content += `\n\n${anonymizer.anonymize(thread, shoppingListText(shoppingList, stamp, timeZone)).text}`;
     const note = store.getState(noteKey(thread));
     if (note) content += `\n\n${anonymizer.anonymize(thread, `(Context from Kesha, not from the user: ${note})`).text}`;
     const snapshot = await this.#snapshot(thread, project, stamp);
     if (snapshot) content += `\n\n${anonymizer.anonymize(thread, snapshot).text}`;
     // The research model answered "Look in Czech stores" in Czech despite the rule in the prompt (2026-10-13): the
     // language, named right after the user's words, is what it follows. A short follow-up keeps the conversation's language
-    if (mode === "research") {
+    if (mode === "research" || mode === "shopping") {
       const detected = detectLanguage(userText);
       if (detected) store.setState(languageKey(thread), detected);
       content += `\n\n${languageNote(detected ?? store.getState(languageKey(thread)))}`;
@@ -283,14 +358,38 @@ export class Agent {
     return { content, hadNote: note !== undefined, hadSnapshot: snapshot !== undefined };
   }
 
-  async turn(thread: string, room: string, userText: string, mode: Mode = "task", project?: RoomProject): Promise<TurnResult> {
-    const { anonymizer, store, limits, timeZone } = this.#d;
+  /** startShopping: the !shop message, which carries the shopping list. Follow-ups in shopping mode don't. */
+  async turn(thread: string, room: string, userText: string, mode: Mode = "task", project?: RoomProject, startShopping = false): Promise<TurnResult> {
+    const { anonymizer, store, limits, timeZone, shopping } = this.#d;
     if (mode === "research" && !this.#d.research) {
       return { reply: "Research is not set up: KESHA_RESEARCH_MODEL is empty.", cost: 0, searches: 0 };
     }
-    const spentBefore = this.spentToday();
-    if (spentBefore >= limits.dailyCap) {
-      return { reply: `Today's budget is used up (${credits(spentBefore)} of ${credits(limits.dailyCap)}). I'm back tomorrow.`, cost: 0, searches: 0 };
+    if (mode === "shopping" && !shopping) {
+      return { reply: "Shopping is not set up: KESHA_SHOPPING_MODEL is empty.", cost: 0, searches: 0 };
+    }
+    const daily = this.#budget(mode);
+    const spentBefore = this.spentToday(daily.budget);
+    if (spentBefore >= daily.cap) {
+      return { reply: `Today's ${daily.what} is used up (${credits(spentBefore)} of ${credits(daily.cap)}). I'm back tomorrow.`, cost: 0, searches: 0 };
+    }
+
+    let tools = this.#d.tools;
+    let toolDefs = this.#toolDefs;
+    let shoppingList: ShoppingList | undefined;
+    if (mode === "shopping" && shopping) {
+      try {
+        tools = [...tools, ...(await shopping.tools())];
+        if (startShopping) shoppingList = await shopping.list();
+      } catch (e) {
+        if (e instanceof RohlikAuthError) {
+          return { reply: "I'm not signed in to Rohlík, or Rohlík no longer accepts my sign-in. Send `!rohlik login`.", cost: 0, searches: 0 };
+        }
+        if (e instanceof VikunjaAuthError) {
+          return { reply: "Vikunja rejected my token, so I can't read the shopping list. Rotate it (README, \"Rotating the Kesha Vikunja token\").", cost: 0, searches: 0, tokenDead: true };
+        }
+        throw e;
+      }
+      toolDefs = toolDefinitions(tools);
     }
 
     const now = this.#now();
@@ -299,13 +398,13 @@ export class Agent {
     store.saveHistory(thread, room, history, now.getTime());
     // The time goes on after pseudonymizing: it holds no PII, and the phone/card patterns must not see it
     const stamp = sentAt(now, timeZone);
-    const { content, hadNote, hadSnapshot } = await this.#userMessage(thread, userText, mode, project, stamp);
+    const { content, hadNote, hadSnapshot } = await this.#userMessage(thread, userText, mode, project, stamp, shoppingList);
     history.push({ role: "user", content });
     const promptProject = project && { id: project.id, title: anonymizer.anonymize(thread, project.title).text };
     // Everything this request changes is recorded under one id, so !undo reverts the request as a whole
     const turnId = randomUUID();
     const t: Turn = {
-      thread, room, run: this.#profile(mode), project, history,
+      thread, room, run: this.#profile(mode), project, history, tools, toolDefs, daily,
       // Built once per turn: identical bytes in every call keep the prompt cache warm
       system: { role: "system", content: systemPrompt(mode, promptProject) },
       ctx: {
@@ -331,7 +430,7 @@ export class Agent {
       : undefined;
     return {
       reply: reply + sourceList(t.sources), cost: t.cost, searches: t.searches, changed: t.changed,
-      ...(t.cost > 0 ? { footer: costFooter(t.cost, t.searches, spentBefore + t.cost, limits.dailyCap, t.fetches) } : {}),
+      ...(t.cost > 0 ? { footer: costFooter(t.cost, t.searches, spentBefore + t.cost, t.daily.cap, t.fetches, t.daily.budget === "shopping" ? "shopping today" : "today") } : {}),
       ...(alert ? { alert } : {}),
       ...(tokenDead ? { tokenDead } : {}),
     };
@@ -339,12 +438,12 @@ export class Agent {
 
   /** The model loop: call, run the tools it asks for, call again, until it answers in text or a cap stops it. */
   async #runSteps(t: Turn): Promise<Outcome> {
-    const { anonymizer, limits } = this.#d;
+    const { anonymizer } = this.#d;
     for (let step = 0; step < t.run.maxSteps; step++) {
       if (t.cost >= t.run.maxCostPerRequest) {
         return { reply: `I stopped: this request reached the cost limit of ${credits(t.run.maxCostPerRequest)} before I was done.` };
       }
-      if (t.spentBefore + t.cost >= limits.dailyCap) return { reply: `I stopped: today's budget of ${credits(limits.dailyCap)} is used up.` };
+      if (t.spentBefore + t.cost >= t.daily.cap) return { reply: `I stopped: today's ${t.daily.what} of ${credits(t.daily.cap)} is used up.` };
 
       const message = await this.#call(t);
       const calls = message.tool_calls ?? [];
@@ -367,7 +466,7 @@ export class Agent {
     const messages: Message[] = [t.system, ...t.history];
     const searchesLeft = run.maxSearches - t.searches;
     const res = await model.complete({
-      model: run.modelName, messages, tools: this.#toolDefs, maxTokens: run.maxTokens, sessionId: store.sessionId(t.thread),
+      model: run.modelName, messages, tools: t.toolDefs, maxTokens: run.maxTokens, sessionId: store.sessionId(t.thread),
       ...(searchesLeft > 0 ? { webSearch: { maxSearches: searchesLeft } } : {}),
       ...(searchesLeft > 0 && run.maxFetches ? { webFetch: { maxFetches: run.maxFetches } } : {}),
       ...(run.reasoning ? { reasoning: run.reasoning } : {}),
@@ -377,7 +476,7 @@ export class Agent {
     t.fetches += res.fetches;
     for (const c of res.citations) if (!t.sources.has(c.url)) t.sources.set(c.url, c.title);
     store.logCall({
-      thread: t.thread, room: t.room, model: res.model, promptTokens: res.promptTokens, completionTokens: res.completionTokens, cost: res.cost,
+      thread: t.thread, room: t.room, model: res.model, budget: t.daily.budget, promptTokens: res.promptTokens, completionTokens: res.completionTokens, cost: res.cost,
       searches: res.searches, cachedTokens: res.cachedTokens, reasoningTokens: res.reasoningTokens,
       request: { model: run.modelName, messages }, response: res.message,
     }, this.#now());
@@ -388,7 +487,7 @@ export class Agent {
   /** Runs the tool calls of one model message, their results going into the history pseudonymized. Returns an outcome
    * only when the request has to end here: Vikunja rejected the token. */
   async #runToolCalls(t: Turn, calls: NonNullable<Completion["message"]["tool_calls"]>): Promise<Outcome | undefined> {
-    const { anonymizer, tools } = this.#d;
+    const { anonymizer } = this.#d;
     for (const call of calls) {
       if (call.type !== "function") continue;
       let result: unknown;
@@ -399,7 +498,7 @@ export class Agent {
         if (t.project && call.function.name === "create_task" && args && typeof args === "object" && !("project_id" in args)) {
           (args as Record<string, unknown>).project_id = t.project.id;
         }
-        result = (await runTool(tools, call.function.name, args, t.ctx)).result;
+        result = (await runTool(t.tools, call.function.name, args, t.ctx)).result;
       } catch (e) {
         if (e instanceof VikunjaAuthError) {
           // Earlier calls of this request may already have written: say so instead of "nothing changed"

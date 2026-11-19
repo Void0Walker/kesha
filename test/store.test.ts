@@ -25,6 +25,10 @@ describe("store", () => {
       const rows = store.db.prepare("SELECT room, searches, cached_tokens FROM calls ORDER BY id").all();
       assert.deepEqual(rows.map((r) => ({ ...r })), [{ room: null, searches: null, cached_tokens: null }, { room: "!r", searches: 2, cached_tokens: 900 }]);
       assert.equal(store.spentOn("2026-10-10"), 0.5);
+      // Rows from before budgets count against the main cap; shopping rows only against shopping's
+      store.logCall({ ...call, budget: "shopping", cost: 0.25 }, new Date("2026-10-10T12:00:00Z"));
+      assert.equal(store.spentOn("2026-10-10"), 0.5);
+      assert.equal(store.spentOn("2026-10-10", "shopping"), 0.25);
       store.db.close();
       new Store(path, "Europe/Berlin").db.close(); // opening again doesn't add the columns twice
     } finally {

@@ -1,6 +1,6 @@
 {
   "name": "kesha",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "private": true,
   "description": "Matrix bot that manages Vikunja tasks through OpenRouter, with PII pseudonymization and hard cost caps",
   "type": "module",
@@ -14,6 +14,7 @@
     "lint": "oxlint"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "matrix-bot-sdk": "^0.8.0",
     "openai": "^7.28.0",
     "yaml": "^2.9.1",

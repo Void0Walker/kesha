@@ -1,8 +1,8 @@
 import { join } from "node:path";
 import { MatrixClient, RustSdkCryptoStorageProvider, SimpleFsStorageProvider } from "matrix-bot-sdk";
 import type { Mode, TurnResult } from "./agent.ts";
-import { notifyRoom, roomMode, roomProject, runCommand, type NotifyKind, type RoomProject } from "./commands.ts";
-import { currentConversation, inResearch, setResearch } from "./conversation.ts";
+import { notifyRoom, roomMode, roomProject, runCommand, type NotifyKind, type RohlikLogin, type RoomProject } from "./commands.ts";
+import { currentConversation, inResearch, inShopping, setResearch, setShopping } from "./conversation.ts";
 import { ErrorReporter } from "./errors.ts";
 import { replyContent, type FormatOptions, type MatrixText } from "./format.ts";
 import { ModelTimeoutError } from "./llm.ts";
@@ -64,10 +64,13 @@ export interface BotClient {
 
 /** What the bot needs from the Agent. */
 export interface TurnAgent {
-  turn(conversation: string, room: string, text: string, mode: Mode, project?: RoomProject): Promise<TurnResult>;
-  spentToday(): number;
+  turn(conversation: string, room: string, text: string, mode: Mode, project?: RoomProject, startShopping?: boolean): Promise<TurnResult>;
+  spentToday(budget?: "main" | "shopping"): number;
   readonly dailyCap: number;
+  // Set when shopping has a daily cap of its own
+  readonly shoppingDailyCap?: number | undefined;
   readonly researchEnabled: boolean;
+  readonly shoppingEnabled: boolean;
 }
 
 export interface BotOptions {
@@ -82,6 +85,8 @@ export interface BotOptions {
   transcriber?: Transcriber;
   store: Store;
   vikunja: VikunjaApi;
+  // Rohlík sign-in for !rohlik. Unset: shopping is off
+  rohlik?: RohlikLogin;
   timeZone: string;
   version: string;
   changelog: string;
@@ -264,10 +269,11 @@ export class Bot {
     store.setState("alert-room", roomId);
 
     try {
-      const { vikunja, timeZone, version, changelog } = this.#o;
+      const { vikunja, timeZone, version, changelog, rohlik } = this.#o;
       const answer = await runCommand({
-        store, vikunja, timeZone, now: () => new Date(), version, changelog, idleHours: idleMs / 3_600_000,
+        store, vikunja, timeZone, ...(rohlik ? { rohlik } : {}), now: () => new Date(), version, changelog, idleHours: idleMs / 3_600_000,
         spentToday: () => agent.spentToday(), dailyCap: agent.dailyCap,
+        ...(agent.shoppingDailyCap !== undefined ? { shoppingToday: { spent: () => agent.spentToday("shopping"), cap: agent.shoppingDailyCap } } : {}),
         newConversation: () => void currentConversation(store, roomId, ev.origin_server_ts, idleMs, true),
       }, roomId, body);
       if (answer !== undefined) {
@@ -282,9 +288,11 @@ export class Bot {
       return;
     }
 
-    // !research <question> or !r <question>: the research model with web search, also for the follow-ups
+    // !research <question> or !r <question>: the research model with web search, also for the follow-ups.
+    // !shop [notes]: the shopping model fills the Rohlík cart from the shopping list, also for the follow-ups
     const command = /^!(?:research|r)\b\s*([\s\S]*)$/i.exec(body);
-    const text = command ? command[1]!.trim() : body;
+    const shop = /^!shop\b\s*([\s\S]*)$/i.exec(body);
+    const text = command ? command[1]!.trim() : shop ? shop[1]!.trim() || "Fill my cart from the shopping list." : body;
     if (command && !text) {
       await reply("Usage: !research <question>, or !r <question>. Follow-ups stay with research until I record a task or decision, or until !new.");
       return;
@@ -295,25 +303,37 @@ export class Bot {
     }
 
     const conversation = currentConversation(store, roomId, ev.origin_server_ts, idleMs);
-    // A conversation started with !r stays in research until a task or decision is recorded, !new or the idle restart
-    const research = command !== null || (agent.researchEnabled && inResearch(store, conversation));
+    // A conversation started with !r stays in research until a task or decision is recorded, !new or the idle restart.
+    // One started with !shop stays in shopping until !new or the idle restart. The latest command wins
+    const research = command !== null || (!shop && agent.researchEnabled && inResearch(store, conversation));
+    const shopping = !research && (shop !== null || (agent.shoppingEnabled && inShopping(store, conversation)));
     // A typing notice lasts 30 s; long requests need it renewed
     const typing = () => void this.client.setTyping(roomId, true, 30_000).catch(() => {});
     typing();
     const renew = setInterval(typing, 20_000);
-    const progress = research ? await send({ ...replyContent("Researching…", format, undefined, undefined, "m.notice") }).catch(() => undefined) : undefined;
-    let outcome = "Research failed.";
+    const label = research ? "Research" : "Shopping";
+    const progress = research || shopping
+      ? await send({ ...replyContent(research ? "Researching…" : "Shopping…", format, undefined, undefined, "m.notice") }).catch(() => undefined)
+      : undefined;
+    let outcome = `${label} failed.`;
     try {
-      const mode = research ? "research" : roomMode(store, roomId) === "letters" ? "letters" : "task";
-      const res = await agent.turn(conversation, roomId, text, mode, roomProject(store, roomId));
+      const mode = research ? "research" : shopping ? "shopping" : roomMode(store, roomId) === "letters" ? "letters" : "task";
+      const res = await agent.turn(conversation, roomId, text, mode, roomProject(store, roomId), shop !== null);
       if (res.tokenDead) this.#vikunjaDown = true;
       if (research && agent.researchEnabled) setResearch(store, conversation, !res.changed);
+      if (command) setShopping(store, conversation, false);
+      if (shop && agent.shoppingEnabled) {
+        setResearch(store, conversation, false);
+        setShopping(store, conversation, true);
+      }
       await send(replyContent(heardLine + res.reply, format, res.footer, res.alert));
-      outcome = `Research done: ${res.searches} ${res.searches === 1 ? "search" : "searches"}, $${res.cost.toFixed(4)}.`;
+      outcome = research
+        ? `Research done: ${res.searches} ${res.searches === 1 ? "search" : "searches"}, $${res.cost.toFixed(4)}.`
+        : `Shopping done: $${res.cost.toFixed(4)}.`;
     } catch (e) {
-      void this.failed(research ? "Research failed" : "Request failed", e, roomId);
+      void this.failed(research ? "Research failed" : shopping ? "Shopping failed" : "Request failed", e, roomId);
       if (e instanceof ModelTimeoutError) {
-        outcome = "Research timed out.";
+        outcome = `${label} timed out.`;
         await reply(`The model stopped answering (${e.message}), so I gave up. Nothing was changed after that. Try again, or ask something narrower.`);
       } else {
         await reply("Something went wrong on my side, nothing was changed after the error. Details are in my logs.");

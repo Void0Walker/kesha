@@ -112,6 +112,8 @@ export interface Tool<S extends z.ZodType = z.ZodType> {
   name: string;
   description: string;
   schema: S;
+  // JSON Schema sent to the model instead of the one made from schema. For MCP tools, whose server checks the arguments
+  parameters?: Record<string, unknown>;
   run(args: z.infer<S>, ctx: ToolContext): Promise<unknown>;
 }
 
@@ -315,6 +317,6 @@ function leanSchema(value: unknown): unknown {
 export function toolDefinitions(tools: Tool[]) {
   return tools.map((t) => ({
     type: "function" as const,
-    function: { name: t.name, description: t.description, parameters: leanSchema(z.toJSONSchema(t.schema)) as Record<string, unknown> },
+    function: { name: t.name, description: t.description, parameters: (t.parameters ?? leanSchema(z.toJSONSchema(t.schema))) as Record<string, unknown> },
   }));
 }

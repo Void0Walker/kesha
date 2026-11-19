@@ -47,3 +47,16 @@ export function peekConversation(store: Store, room: string): string | undefined
   const raw = store.getState(stateKey(room));
   return raw ? conversationKey(room, (JSON.parse(raw) as ConversationState).epoch) : undefined;
 }
+
+// Set by !shop: the conversation's follow-ups stay with the shopping model and the Rohlík tools until !new or the idle
+// restart. Unlike research, recording a task doesn't end it: "mark what you added as done" is part of shopping
+const shoppingKey = (conversation: string) => `shopping:${conversation}`;
+
+export function inShopping(store: Store, conversation: string): boolean {
+  return store.getState(shoppingKey(conversation)) !== undefined;
+}
+
+export function setShopping(store: Store, conversation: string, on: boolean): void {
+  if (on) store.setState(shoppingKey(conversation), "1");
+  else store.deleteState(shoppingKey(conversation));
+}

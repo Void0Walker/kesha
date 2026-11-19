@@ -4,7 +4,10 @@ import { Agent, compactHistory, costFooter, sentAt, snapshotText, trimHistory, t
 import type { Message } from "../src/llm.ts";
 import { Anonymizer, parseDictionary } from "../src/anonymizer.ts";
 import { Store } from "../src/store.ts";
-import { createTools, openTasks } from "../src/tools.ts";
+import { z } from "zod";
+import { choiceTools, ProductChoices } from "../src/choices.ts";
+import { RohlikAuthError } from "../src/rohlik.ts";
+import { createTools, openTasks, type Tool } from "../src/tools.ts";
 import { undoLast } from "../src/undo.ts";
 import { runCommand } from "../src/commands.ts";
 import { currentConversation } from "../src/conversation.ts";
@@ -571,5 +574,153 @@ describe("letters rooms", () => {
     const model = new ScriptedModel([(req) => (assert.equal(req.model, "test/model"), assert.match(String(req.messages[0]!.content), /drafting letters/), say("ok"))]);
     const { agent } = setup(model);
     await agent.turn("c", "!room", "draft something", "letters");
+  });
+});
+
+describe("shopping", () => {
+  const SHOP: ModelProfile = { modelName: "test/shopper", maxSteps: 6, maxTokens: 3000, maxCostPerRequest: 1, maxSearches: 0, reasoning: "low" };
+
+  /** Rohlík tools as the MCP client gives them: raw JSON Schema, the server checks the arguments. */
+  function rohlikTools(calls: { name: string; args: unknown }[]): Tool[] {
+    const tool = (name: string, result: (args: Record<string, unknown>) => unknown): Tool => ({
+      name, description: `Rohlík ${name}`, schema: z.record(z.string(), z.unknown()),
+      parameters: { type: "object", properties: { query: { type: "string" } } },
+      run: async (args) => {
+        calls.push({ name, args });
+        return result(args as Record<string, unknown>);
+      },
+    });
+    return [
+      tool("search_products", (a) => JSON.stringify([{ id: 111, name: `${String(a.query)} polotučné 1 l`, price: "24.90 Kč" }])),
+      tool("add_items_to_cart", () => "Added. Cart total 49.80 Kč, delivery to Jana Nováková"),
+    ];
+  }
+
+  function shopSetup(model: ScriptedModel, o: { signedIn?: boolean; limits?: Partial<Limits> } = {}) {
+    const store = new Store(":memory:", "Europe/Berlin");
+    const v = new FakeVikunja();
+    const anonymizer = new Anonymizer(parseDictionary(DICT), store);
+    const calls: { name: string; args: unknown }[] = [];
+    const choices = new ProductChoices(store.db);
+    const agent = new Agent({
+      model, task: TASK, tools: createTools(v, { inboxProjectId: 1 }), anonymizer, store, limits: { ...LIMITS, dailyCap: 5, ...o.limits },
+      timeZone: "Europe/Berlin", now: () => NOW,
+      shopping: {
+        profile: SHOP,
+        tools: async () => {
+          if (o.signedIn === false) throw new RohlikAuthError();
+          return [...rohlikTools(calls), ...choiceTools(choices)];
+        },
+        list: async () => {
+          const open = await openTasks(v, 2);
+          return { project: { id: 2, title: "Groceries" }, tasks: open.tasks, complete: open.complete, choices: choices.list() };
+        },
+      },
+    });
+    return { agent, v, calls, choices, store };
+  }
+
+  it("fills the cart from the shopping project with the shopping model, names kept from the model", async () => {
+    const model = new ScriptedModel([
+      (req) => {
+        assert.equal(req.model, "test/shopper");
+        assert.equal(req.reasoning, "low");
+        const system = String(req.messages[0]!.content);
+        assert.match(system, /Rohlík\.cz/);
+        assert.match(system, /can't place, schedule or pay for an order/);
+        const names = req.tools.map((t) => (t.type === "function" ? t.function.name : ""));
+        assert.ok(names.includes("search_products") && names.includes("create_task"));
+        const user = String(req.messages.at(-1)!.content);
+        assert.match(user, /open tasks of the shopping project "Groceries" \(id 2\)/);
+        assert.match(user, /#1 Mléko 2x \(polotučné\); #2 Flowers for <PERSON_1>; #3 Call the plumber/);
+        assert.doesNotMatch(user, /Secret gift/);
+        return toolCall("search_products", { query: "mléko" });
+      },
+      toolCall("add_items_to_cart", { items: [{ product_id: 111, quantity: 2 }] }),
+      (req) => {
+        assert.match(String(req.messages.at(-1)!.content), /delivery to <PERSON_1>/);
+        return say("Added **Mléko polotučné 1 l** ×2 (24.90 Kč each). Skipped: Call the plumber. Check the cart and order in Rohlík.");
+      },
+    ]);
+    const { agent, v, calls } = shopSetup(model);
+    v.add({ title: "Mléko 2x", description: "<p>polotučné</p>", project_id: 2 });
+    v.add({ title: "Flowers for Jana", project_id: 2 });
+    v.add({ title: "Call the plumber", project_id: 2 });
+    v.add({ title: "Secret gift", project_id: 2, labels: [{ id: 9, title: "private" }] });
+    v.add({ title: "Bought bread", project_id: 2, done: true });
+
+    const res = await agent.turn("c", "!room", "Fill my cart from the shopping list.", "shopping", undefined, true);
+    assert.deepEqual(calls.map((c) => c.name), ["search_products", "add_items_to_cart"]);
+    assert.match(res.reply, /Mléko polotučné/);
+    assert.doesNotMatch(model.sent(), /Jana/);
+    // Tasks are left alone
+    assert.equal(v.writes.length, 0);
+  });
+
+  it("sends the list only with !shop, not with follow-ups", async () => {
+    const model = new ScriptedModel([
+      (req) => (assert.match(String(req.messages.at(-1)!.content), /shopping project/), say("Added milk.")),
+      (req) => (assert.doesNotMatch(String(req.messages.at(-1)!.content), /shopping project/), say("Swapped it.")),
+    ]);
+    const { agent, v } = shopSetup(model);
+    v.add({ title: "Milk", project_id: 2 });
+    await agent.turn("c", "!room", "Fill my cart from the shopping list.", "shopping", undefined, true);
+    await agent.turn("c", "!room", "Swap the milk for oat milk", "shopping");
+  });
+
+  it("gives the model the remembered choices, and remembers what the user picks", async () => {
+    const model = new ScriptedModel([
+      (req) => {
+        assert.match(String(req.messages.at(-1)!.content), /voda → Magnesia Mg2\+ 1,5 l \(product id 111\)/);
+        return say("Added Magnesia. For milk: 1) Mléko polotučné 1 l, 24.90 Kč 2) Ovesné mléko 1 l, 49.90 Kč. Which one?");
+      },
+      (req) => (assert.match(String(req.messages.at(-1)!.content), /the oat one, always/), toolCall("remember_product_choice", { item: "mléko", product_id: 222, product: "Ovesné mléko 1 l" })),
+      say("Added the oat milk, and I'll use it next time."),
+    ]);
+    const { agent, v, choices } = shopSetup(model);
+    choices.remember({ item: "voda", productId: "111", product: "Magnesia Mg2+ 1,5 l" });
+    v.add({ title: "voda", project_id: 2 });
+    v.add({ title: "mléko", project_id: 2 });
+    await agent.turn("c", "!room", "Fill my cart from the shopping list.", "shopping", undefined, true);
+    await agent.turn("c", "!room", "the oat one, always", "shopping");
+    assert.deepEqual(choices.list().map((c) => [c.item, c.productId]), [["mléko", "222"], ["voda", "111"]]);
+  });
+
+  it("asks for !rohlik login instead of calling the model when Kesha isn't signed in", async () => {
+    const model = new ScriptedModel([]);
+    const { agent } = shopSetup(model, { signedIn: false });
+    const res = await agent.turn("c", "!room", "Fill my cart", "shopping", undefined, true);
+    assert.match(res.reply, /!rohlik login/);
+    assert.equal(res.cost, 0);
+    assert.equal(model.requests.length, 0);
+  });
+
+  it("counts shopping against its own daily cap, apart from everything else", async () => {
+    const model = new ScriptedModel([say("Added."), say("Added more."), say("ok")], 0.4);
+    const { agent, store } = shopSetup(model, { limits: { dailyCap: 1, shoppingDailyCap: 3 } });
+    // Tasks used up the main budget today; shopping still works
+    store.logCall({ thread: "x", model: "m", promptTokens: 1, completionTokens: 1, cost: 1, request: {}, response: {} }, NOW);
+    assert.match((await agent.turn("c", "!room", "what's due?", "task")).reply, /Today's budget is used up/);
+    const res = await agent.turn("c", "!room", "Fill my cart", "shopping", undefined, true);
+    assert.equal(res.footer, "— $0.4000 · shopping today $0.4000 of $3.00");
+    assert.equal(agent.spentToday("shopping"), 0.4);
+    assert.equal(agent.spentToday(), 1);
+    // And the shopping cap stops shopping only
+    store.logCall({ thread: "x", model: "m", promptTokens: 1, completionTokens: 1, cost: 2.6, budget: "shopping", request: {}, response: {} }, NOW);
+    assert.match((await agent.turn("c", "!room", "more", "shopping")).reply, /Today's shopping budget is used up \(\$3\.0000 of \$3\.0000\)/);
+  });
+
+  it("counts shopping against the main cap when it has none of its own", async () => {
+    const model = new ScriptedModel([say("Added.")], 0.4);
+    const { agent } = shopSetup(model, { limits: { dailyCap: 5 } });
+    const res = await agent.turn("c", "!room", "Fill my cart", "shopping", undefined, true);
+    assert.equal(res.footer, "— $0.4000 · today $0.4000 of $5.00");
+    assert.equal(agent.spentToday(), 0.4);
+  });
+
+  it("offers the Rohlík tools only in shopping", async () => {
+    const model = new ScriptedModel([(req) => (assert.ok(!req.tools.some((t) => t.type === "function" && t.function.name === "search_products")), say("ok"))]);
+    const { agent } = shopSetup(model);
+    await agent.turn("c", "!room", "what's due today?", "task");
   });
 });

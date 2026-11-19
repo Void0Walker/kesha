@@ -56,6 +56,20 @@ const Env = z.object({
   KESHA_LETTERS_MAX_TOKENS: z.coerce.number().int().positive().default(3000),
   KESHA_LETTERS_MAX_COST_PER_REQUEST: money(0.25),
   KESHA_LETTERS_REASONING_EFFORT: z.enum(["off", "low", "medium", "high"]).optional(),
+  // !shop: fills the Rohlík cart from the shopping project's open tasks. Needs a ZDR endpoint. Unset: shopping is off
+  KESHA_SHOPPING_MODEL: z.string().min(1).optional(),
+  // The Vikunja project the shopping list is read from, by title. Its other tasks are left alone
+  KESHA_SHOPPING_PROJECT: z.string().min(1).default("Daily"),
+  KESHA_SHOPPING_MAX_STEPS: z.coerce.number().int().positive().default(30),
+  KESHA_SHOPPING_MAX_TOKENS: z.coerce.number().int().positive().default(3000),
+  // A full list is 20-40 model calls
+  KESHA_SHOPPING_MAX_COST_PER_REQUEST: money(1),
+  // Shopping's own daily cap, apart from KESHA_DAILY_COST_CAP (which then no longer counts shopping). Unset: shared
+  KESHA_SHOPPING_DAILY_COST_CAP: z.coerce.number().positive().optional(),
+  KESHA_SHOPPING_REASONING_EFFORT: z.enum(["off", "low", "medium", "high"]).default("low"),
+  // Rohlík tools the model may use, comma-separated. Unset: the cart and product tools in src/rohlik.ts
+  KESHA_ROHLIK_TOOLS: list.optional(),
+  KESHA_ROHLIK_MCP_URL: z.url().default("https://mcp.rohlik.cz/mcp"),
   // Exa through OpenRouter, per search. Added to the cost when OpenRouter's reported cost leaves it out
   KESHA_SEARCH_COST: money(0.007),
 

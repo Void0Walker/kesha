@@ -27,6 +27,8 @@ describe("spoken commands", () => {
     assert.equal(spokenCommand("Command project, Home."), "!project home");
     assert.equal(spokenCommand("Command project none"), "!project none");
     assert.equal(spokenCommand("Command mode letters."), "!mode letters");
+    assert.equal(spokenCommand("Command shopping."), "!shop");
+    assert.equal(spokenCommand("Command shop, no meat this week."), "!shop no meat this week.");
   });
 
   it("leaves ordinary speech alone, including sentences with 'command' later in them", () => {

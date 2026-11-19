@@ -17,6 +17,9 @@ export interface ChangeRow {
   after: Record<string, unknown>;
 }
 
+// shopping: !shop requests, when they have their own daily cap. main: everything else
+export type Budget = "main" | "shopping";
+
 export interface CallLog {
   thread: string;
   room?: string;
@@ -27,6 +30,8 @@ export interface CallLog {
   searches?: number;
   cachedTokens?: number;
   reasoningTokens?: number;
+  // Which daily cap the call counts against. Unset: the main one
+  budget?: Budget;
   // Exactly what was sent and received, already pseudonymized. Kept for reviewing leaks
   request: unknown;
   response: unknown;
@@ -63,9 +68,9 @@ export class Store {
         kind TEXT NOT NULL, before_json TEXT, after_json TEXT NOT NULL, undone_at INTEGER);
       CREATE INDEX IF NOT EXISTS changes_room ON changes(room, id);
     `);
-    // Added in 0.6.0. Nullable, so an older image can still insert rows after a rollback
+    // Added in 0.6.0 (budget in 1.8.0). Nullable, so an older image can still insert rows after a rollback
     const columns = new Set((this.db.prepare("PRAGMA table_info(calls)").all() as { name: string }[]).map((c) => c.name));
-    for (const [name, type] of [["room", "TEXT"], ["searches", "INTEGER"], ["cached_tokens", "INTEGER"], ["reasoning_tokens", "INTEGER"]]) {
+    for (const [name, type] of [["room", "TEXT"], ["searches", "INTEGER"], ["cached_tokens", "INTEGER"], ["reasoning_tokens", "INTEGER"], ["budget", "TEXT"]]) {
       if (!columns.has(name!)) this.db.exec(`ALTER TABLE calls ADD COLUMN ${name} ${type}`);
     }
   }
@@ -76,9 +81,10 @@ export class Store {
 
   logCall(c: CallLog, now = new Date()): void {
     this.db
-      .prepare("INSERT INTO calls (ts, day, thread, room, model, prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens, searches, cost, request, response) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .prepare("INSERT INTO calls (ts, day, thread, room, model, prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens, searches, cost, budget, request, response) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
       .run(now.toISOString(), this.today(now), c.thread, c.room ?? null, c.model, c.promptTokens, c.completionTokens,
-        c.cachedTokens ?? null, c.reasoningTokens ?? null, c.searches ?? null, c.cost, JSON.stringify(c.request), JSON.stringify(c.response));
+        c.cachedTokens ?? null, c.reasoningTokens ?? null, c.searches ?? null, c.cost, c.budget === "shopping" ? "shopping" : null,
+        JSON.stringify(c.request), JSON.stringify(c.response));
   }
 
   /** The request/response bodies are for reviewing leaks and grow fast: blank them after maxAgeMs, keep the costs.
@@ -104,8 +110,10 @@ export class Store {
     return createHash("sha256").update(`${secret}:${thread}`).digest("hex").slice(0, 32);
   }
 
-  spentOn(day: string): number {
-    const row = this.db.prepare("SELECT COALESCE(SUM(cost), 0) AS total FROM calls WHERE day = ?").get(day) as { total: number };
+  /** Spent on that day against one daily cap. Rows without a budget (and from before 1.8.0) are the main one. */
+  spentOn(day: string, budget: Budget = "main"): number {
+    const row = this.db.prepare(`SELECT COALESCE(SUM(cost), 0) AS total FROM calls WHERE day = ? AND ${budget === "shopping" ? "budget = 'shopping'" : "budget IS NULL"}`)
+      .get(day) as { total: number };
     return row.total;
   }
 

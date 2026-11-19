@@ -53,9 +53,10 @@ describe("commands", () => {
     assert.equal(newConversations(), 1);
   });
 
-  it("shows today's spend", async () => {
-    const { run } = setup();
+  it("shows today's spend, and shopping's when it has its own cap", async () => {
+    const { run, deps } = setup();
     assert.equal(await run("!cost today"), "Spent today: $0.1234 of $1.00");
+    assert.equal(await runCommand({ ...deps, shoppingToday: { spent: () => 0.5, cap: 3 } }, "!a", "!cost today"), "Spent today: $0.1234 of $1.00, shopping $0.5000 of $3.00");
   });
 
   it("sets a room's project by exact name, then by unique part of it", async () => {

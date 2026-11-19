@@ -1,6 +1,8 @@
 import { addConversationNote, markSnapshotStale } from "./agent.ts";
 import { peekConversation } from "./conversation.ts";
+import type { ProductChoices } from "./choices.ts";
 import { markAnnounced, releaseText } from "./release.ts";
+import { RohlikAuthError, type RohlikStatus } from "./rohlik.ts";
 import { addDays, type Store } from "./store.ts";
 import { dueOf, openTasks } from "./tools.ts";
 import { undoLast } from "./undo.ts";
@@ -38,11 +40,21 @@ export function notifyRoom(store: Store, kind: NotifyKind): string | undefined {
   return kind === "errors" ? set : set ?? store.getState("alert-room");
 }
 
+/** What !rohlik needs: Kesha's Rohlík sign-in. */
+export interface RohlikLogin {
+  status(): RohlikStatus;
+  startLogin(): Promise<URL>;
+  finishLogin(pasted: string): Promise<void>;
+  logout(): Promise<void>;
+  readonly choices: ProductChoices;
+}
+
 export function help(idleHours: number): string {
   return [
     `Write to me in plain language about your tasks. Each room is one conversation; it starts fresh after ${idleHours} h of silence or with !new.`,
     "",
     "- `!r <question>` or `!research <question>`: research with web search. Follow-ups stay in research until I record a task or decision, or `!new`",
+    "- `!shop`: fill the Rohlík cart from the shopping list. Add notes like `!shop no meat this week`. Follow-ups stay with shopping until `!new`. `!rohlik login` signs me in to Rohlík once, `!rohlik choices` shows the products I remember for your items",
     "- `!project <name>`: new tasks in this room go to that project. `!project` shows it, `!project none` removes it",
     "- `!mode letters`: this room drafts letters and emails (formal Czech by default). `!mode tasks` switches back, `!mode` shows it",
     "- `!today`, `!week`, `!open`: what's due today, this week, or all open tasks (this room's project, or all)",
@@ -66,11 +78,15 @@ export interface CommandDeps {
   now(): Date;
   spentToday(): number;
   dailyCap: number;
+  // Set when shopping has a daily cap of its own
+  shoppingToday?: { spent(): number; cap: number };
   version: string;
   changelog: string;
   idleHours: number;
   // Starts a new conversation in the room the command came from
   newConversation(): void;
+  // Unset: shopping is off
+  rohlik?: RohlikLogin;
 }
 
 /** Returns the reply, or undefined when the message is not a command (or is !research / !r, which go to the agent). */
@@ -82,14 +98,21 @@ export async function runCommand(d: CommandDeps, room: string, body: string): Pr
   switch (name) {
     case "research":
     case "r":
+    case "shop":
       return undefined;
+    case "rohlik":
+      return rohlikCommand(d, arg);
     case "help":
       return help(d.idleHours);
     case "new":
       d.newConversation();
       return "New conversation: I've forgotten what we talked about in this room before.";
     case "cost":
-      if (/^today$/i.test(arg)) return `Spent today: $${d.spentToday().toFixed(4)} of $${d.dailyCap.toFixed(2)}`;
+      if (/^today$/i.test(arg)) {
+        const shop = d.shoppingToday;
+        return `Spent today: $${d.spentToday().toFixed(4)} of $${d.dailyCap.toFixed(2)}` +
+          (shop ? `, shopping $${shop.spent().toFixed(4)} of $${shop.cap.toFixed(2)}` : "");
+      }
       if (/^week$/i.test(arg)) return costWeek(d, room);
       return costMonth(d, room);
     case "today":
@@ -234,4 +257,53 @@ function modeCommand(d: CommandDeps, room: string, arg: string): string {
   return next === "letters"
     ? "This room now drafts letters and emails, formal Czech unless you ask otherwise. Describe who it's for and what you need; send !new before the next letter."
     : "This room is for tasks again.";
+}
+
+async function rohlikCommand(d: CommandDeps, arg: string): Promise<string> {
+  const { rohlik } = d;
+  if (!rohlik) return "Shopping is not set up: KESHA_SHOPPING_MODEL is empty.";
+  const [sub = "", ...rest] = arg.split(/\s+/);
+  try {
+    switch (sub.toLowerCase()) {
+      case "": {
+        const s = rohlik.status();
+        if (s.signedIn) return "I'm signed in to Rohlík. `!rohlik logout` signs me out, `!rohlik login` signs in again.";
+        return s.pending
+          ? "A Rohlík sign-in is waiting: paste the address the browser ended on with `!rohlik code <address>`, or start over with `!rohlik login`."
+          : "I'm not signed in to Rohlík. Send `!rohlik login`.";
+      }
+      case "login": {
+        const url = await rohlik.startLogin();
+        return [
+          "Sign me in to Rohlík:",
+          `1. Open ${url.href} and sign in. Rohlík warns that Kesha is not a verified app: that's expected for an app that registers itself, allow it since you started this.`,
+          "2. The browser then tries to open a localhost page that fails to load. Copy its whole address and send `!rohlik code <address>` within a few minutes.",
+          "The code in it only works once, and only for me.",
+        ].join("\n");
+      }
+      case "code":
+        if (!rest.length) return "Send `!rohlik code <the address the browser ended on>`.";
+        await rohlik.finishLogin(rest.join(" "));
+        return "Signed in to Rohlík. `!shop` fills the cart from your shopping list.";
+      case "choices": {
+        const list = rohlik.choices.list();
+        if (!list.length) return "I don't remember any product choices yet. When you pick a product while shopping, I remember it for next time.";
+        return `Products I use for your list:\n${list.map((c) => `- ${c.item} → ${c.product}${c.note ? ` (${c.note})` : ""}`).join("\n")}\n\n\`!rohlik forget <item>\` removes one.`;
+      }
+      case "forget": {
+        const item = rest.join(" ");
+        if (!item) return "Send `!rohlik forget <item>`, e.g. `!rohlik forget voda`.";
+        return rohlik.choices.forget(item) ? `Forgot the product for "${item}": I'll ask next time.` : `I don't remember a product for "${item}". \`!rohlik choices\` lists them.`;
+      }
+      case "logout":
+        await rohlik.logout();
+        return "Signed out of Rohlík: I forgot my tokens. `!rohlik login` signs me in again.";
+      default:
+        return "Use `!rohlik`, `!rohlik login`, `!rohlik code <address>`, `!rohlik choices`, `!rohlik forget <item>` or `!rohlik logout`.";
+    }
+  } catch (e) {
+    if (e instanceof RohlikAuthError) return e.message;
+    console.warn("rohlik sign-in failed:", e);
+    return `The Rohlík sign-in failed: ${e instanceof Error ? e.message : String(e)}. Try \`!rohlik login\` again.`;
+  }
 }

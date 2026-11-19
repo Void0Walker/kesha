@@ -19,6 +19,12 @@ describe("billedCost", () => {
   it("adds them on top of the reported cost when there is no breakdown", () => {
     assert.ok(Math.abs(billedCost({ cost: 0.01 }, 0.007) - 0.017) < 1e-12);
   });
+
+  it("counts the provider's price on the user's own key (BYOK), not only OpenRouter's fee", () => {
+    assert.ok(Math.abs(billedCost({ cost: 0.0004, is_byok: true, cost_details: { upstream_inference_cost: 0.008 } }, 0) - 0.0084) < 1e-12);
+    // Inside OpenRouter's free BYOK allowance the fee is 0
+    assert.equal(billedCost({ cost: 0, is_byok: true, cost_details: { upstream_inference_cost: 0.008 } }, 0), 0.008);
+  });
 });
 
 describe("withCacheControl", () => {

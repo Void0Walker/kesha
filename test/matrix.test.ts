@@ -53,12 +53,13 @@ class FakeClient implements BotClient {
 
 /** Answers every turn after `release` resolves, so tests control when a request ends. */
 class FakeAgent implements TurnAgent {
-  readonly turns: { conversation: string; text: string; mode: string }[] = [];
+  readonly turns: { conversation: string; text: string; mode: string; startShopping?: boolean }[] = [];
   release: Promise<void> = Promise.resolve();
   readonly dailyCap = 1;
-  readonly researchEnabled = false;
-  async turn(conversation: string, _room: string, text: string, mode: string): Promise<TurnResult> {
-    this.turns.push({ conversation, text, mode });
+  readonly researchEnabled = true;
+  readonly shoppingEnabled = true;
+  async turn(conversation: string, _room: string, text: string, mode: string, _project?: unknown, startShopping?: boolean): Promise<TurnResult> {
+    this.turns.push({ conversation, text, mode, ...(startShopping ? { startShopping } : {}) });
     await this.release;
     return { reply: `Done: ${text}`, cost: 0.001, searches: 0 };
   }
@@ -205,6 +206,33 @@ describe("matrix bot", () => {
     await settled();
     await settled();
     assert.equal(client.bodies().at(-1), "Done: again");
+  });
+
+  it("!shop starts shopping with the list; follow-ups stay in shopping until !new, !r takes over", async () => {
+    const { client, agent } = await setup();
+    const say = async (body: string) => {
+      client.handlers.message!("!room", message(body));
+      await settled();
+      await settled();
+    };
+    await say("!shop");
+    await say("swap the milk for oat milk");
+    await say("!new");
+    await say("what's due today?");
+    await say("!shop no meat");
+    await say("!r best oat milk");
+    await say("and cheaper?");
+    assert.deepEqual(agent.turns.map((t) => [t.mode, t.text, t.startShopping ?? false]), [
+      ["shopping", "Fill my cart from the shopping list.", true],
+      ["shopping", "swap the milk for oat milk", false],
+      ["task", "what's due today?", false],
+      ["shopping", "no meat", true],
+      ["research", "best oat milk", false],
+      ["research", "and cheaper?", false],
+    ]);
+    // A notice that is edited with the outcome
+    assert.ok(client.bodies().includes("Shopping…"));
+    assert.ok(client.bodies().some((b) => /^\* Shopping done: \$0\.0010\.$/.test(b)));
   });
 
   describe("voice messages", () => {

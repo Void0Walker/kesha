@@ -2,6 +2,13 @@
 
 Kesha posts the section of a new version to the chat once it runs. Keep entries short and written for the user.
 
+## 1.8.0
+
+- Shopping at Rohlík: `!shop` reads the open tasks in your Daily project, picks out the things to buy and puts them in your Rohlík cart. I tell you what I added, what I skipped, and what I need you to choose. Add notes like `!shop no meat this week`; follow-ups ("swap the milk for oat milk") stay with shopping until `!new`. I only fill the cart: you check it and order in Rohlík. Sign me in once with `!rohlik login`.
+- I remember the products you choose: pick one when I ask, or tell me ("water is always Magnesia"), and next time I add it straight away without searching or asking. `!rohlik choices` shows what I remember, `!rohlik forget voda` drops one.
+- Shopping has its own daily budget, so a big shop doesn't use up the day's budget for everything else. `!cost today` shows both.
+- Calls paid with your own Anthropic key through OpenRouter are counted at their real price in the cost line and the daily cap.
+
 ## 1.7.0
 
 - Voice messages: I write down what I heard and answer it like a typed message. English only for now, so Czech comes out garbled. Say "command" and a command's name to run it by voice: "command today", "command cost week", "command research, what is...". What I heard is shown at the top of my reply, so you can see when I misheard.

@@ -8,6 +8,8 @@ import { describeError, PastError } from "./errors.ts";
 import { checkTokenExpiry } from "./expiry.ts";
 import { OpenRouter } from "./llm.ts";
 import { Bot } from "./matrix.ts";
+import { choiceTools } from "./choices.ts";
+import { Rohlik } from "./rohlik.ts";
 import { activeConversations } from "./conversation.ts";
 import { announceRelease } from "./release.ts";
 import { Store } from "./store.ts";
@@ -56,10 +58,24 @@ try {
   crash(e instanceof VikunjaAuthError ? "Startup check: Vikunja token expired or revoked" : "Startup check: Vikunja unreachable", e);
 }
 console.log("vikunja: token works");
-console.log(`models: ${config.KESHA_MODEL}, research ${config.KESHA_RESEARCH_MODEL ?? "off"}, letters ${config.KESHA_LETTERS_MODEL ?? config.KESHA_MODEL}`);
+console.log(`models: ${config.KESHA_MODEL}, research ${config.KESHA_RESEARCH_MODEL ?? "off"}, letters ${config.KESHA_LETTERS_MODEL ?? config.KESHA_MODEL}, shopping ${config.KESHA_SHOPPING_MODEL ?? "off"}`);
 console.log(`voice: ${config.KESHA_TRANSCRIBE_URL ?? "off"}`);
 
 const anonymizer = new Anonymizer(dictionary, store);
+const rohlik = config.KESHA_SHOPPING_MODEL
+  ? new Rohlik(store, { url: config.KESHA_ROHLIK_MCP_URL, ...(config.KESHA_ROHLIK_TOOLS ? { allowed: config.KESHA_ROHLIK_TOOLS } : {}) })
+  : undefined;
+if (rohlik) console.log(`rohlik: ${rohlik.status().signedIn ? "signed in" : "not signed in, send !rohlik login"}, list from "${config.KESHA_SHOPPING_PROJECT}"`);
+
+/** The shopping project by title, as !project matches it: exact first, else the only one containing it. */
+async function shoppingProject() {
+  const projects = (await vikunja.listProjects()).filter((p) => !p.is_archived);
+  const want = config.KESHA_SHOPPING_PROJECT.toLocaleLowerCase();
+  const exact = projects.filter((p) => p.title.trim().toLocaleLowerCase() === want);
+  const found = exact.length ? exact : projects.filter((p) => p.title.toLocaleLowerCase().includes(want));
+  if (found.length !== 1) throw new Error(`KESHA_SHOPPING_PROJECT "${config.KESHA_SHOPPING_PROJECT}" matches ${found.length} Vikunja projects, expected one`);
+  return { id: found[0]!.id, title: found[0]!.title };
+}
 const agent = new Agent({
   model: new OpenRouter({
     apiKey: config.OPENROUTER_API_KEY, baseURL: config.OPENROUTER_BASE_URL, zdr: config.OPENROUTER_ZDR,
@@ -94,12 +110,36 @@ const agent = new Agent({
         },
       }
     : {}),
+  ...(rohlik && config.KESHA_SHOPPING_MODEL
+    ? {
+        shopping: {
+          profile: {
+            modelName: config.KESHA_SHOPPING_MODEL,
+            maxSteps: config.KESHA_SHOPPING_MAX_STEPS,
+            maxTokens: config.KESHA_SHOPPING_MAX_TOKENS,
+            maxCostPerRequest: config.KESHA_SHOPPING_MAX_COST_PER_REQUEST,
+            maxSearches: 0,
+            reasoning: config.KESHA_SHOPPING_REASONING_EFFORT,
+          },
+          tools: async () => [...(await rohlik.tools()), ...choiceTools(rohlik.choices)],
+          list: async () => {
+            const project = await shoppingProject();
+            // Four pages: 200 open tasks
+            const open = await openTasks(vikunja, project.id, 4);
+            return { project, tasks: open.tasks, complete: open.complete, choices: rohlik.choices.list() };
+          },
+        },
+      }
+    : {}),
   tools: createTools(vikunja, { inboxProjectId: config.VIKUNJA_INBOX_PROJECT_ID, variants: (term) => anonymizer.variants(term), timeZone: config.KESHA_TIMEZONE }),
   // Two pages are plenty for the 30 tasks shown, and keep the snapshot to at most two requests
   listOpenTasks: async (projectId) => (await openTasks(vikunja, projectId, 2)).tasks,
   anonymizer,
   store,
-  limits: { alertCost: config.KESHA_ALERT_COST, dailyCap: config.KESHA_DAILY_COST_CAP },
+  limits: {
+    alertCost: config.KESHA_ALERT_COST, dailyCap: config.KESHA_DAILY_COST_CAP,
+    ...(config.KESHA_SHOPPING_DAILY_COST_CAP ? { shoppingDailyCap: config.KESHA_SHOPPING_DAILY_COST_CAP } : {}),
+  },
   timeZone: config.KESHA_TIMEZONE,
 });
 
@@ -111,6 +151,7 @@ const bot = new Bot({
   agent,
   store,
   vikunja,
+  ...(rohlik ? { rohlik } : {}),
   timeZone: config.KESHA_TIMEZONE,
   version,
   changelog,
